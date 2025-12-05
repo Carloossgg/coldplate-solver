@@ -1,5 +1,11 @@
 # SIMPLE implementation in C++ 
 
+The command that I use to run the code is:
+
+Command for compiling: g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities\boundaries.cpp Utilities\iterations.cpp Utilities\output.cpp Utilities\postprocessing.cpp -I. -I"C:\Toolbox Coding\eigen-5.0.0" -O3 -o simple.exe
+
+Command for running: .\simple.exe
+
 ## Overview 
 
 Semi-Implicit Method for Pressure Linked Equations (SIMPLE) is an iterative solver for the Navier-Stokes equations. This implementation uses finite volume discretization, is steady-state and only supports laminar incompressible flow. I got started on implementing transient behavior and a K-epsilon turbulence model, together with other scalar transport functions almost two years ago, but had no time due to work, so I decided to upload the parts that worked to GitHub. I have been working mostly with OpenFOAM recently, rather than implementing solvers from scratch. 
