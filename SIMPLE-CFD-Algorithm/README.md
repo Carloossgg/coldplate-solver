@@ -72,34 +72,34 @@ Results (fields, histories, VTK) land in `ExportFiles/`.
 ## Flowchart (pipeline)
 ```mermaid
 flowchart TD
-  A[GeometryGenerator.py\n- set geometry/mesh\n- fluid params\n- write ExportFiles/] --> B[Build\n g++ SIMPLE.cpp + Utilities/*.cpp\n -I. -I<Eigen> -fopenmp -O3]
-  B --> C[Run simple(.exe)]
+  A[GeometryGenerator.py<br/>- set geometry/mesh<br/>- fluid params<br/>- write ExportFiles/] --> B[Build<br/>g++ SIMPLE.cpp + Utilities/*.cpp<br/>-I. -I (Eigen include) -fopenmp -O3]
+  B --> C[Run solver (simple.exe)]
 
-  subgraph SIMPLE Loop
-    C --> C1[Load params/geometry\nallocate fields/masks\ninit logs]
+  subgraph SIMPLE_LOOP[SIMPLE Loop]
+    C --> C1[Load params/geometry<br/>allocate fields/masks<br/>init logs]
     C1 --> C2[Iteration loop]
 
-    subgraph Iteration
-      C2 --> I1[Momentum U/V\nFOU + optional SOU\nBrinkman masks\nsolve U, V]
-      I1 --> I2[Pseudo-time / CFL ramp\nupdateCflRamp\nlog pseudo-dt stats]
-      I2 --> I3[Pressure correction\nassemble A_p, b_p\nDirect (LDLT) or SOR\ncache mapping/factor]
-      I3 --> I4[Velocity correction\napply dP\nBCs]
-      I4 --> I5[Residuals & dP\ncore/full planes]
-      I5 --> I6[Logging/output\nresiduals.txt\ndp_history.txt\nconsole row\ncheckpoint optional]
-      I6 --> I7[Convergence check\n(residuals or dP window)]
+    subgraph ITERATION[Iteration]
+      C2 --> I1[Momentum U/V<br/>FOU + optional SOU<br/>Brinkman masks<br/>solve U, V]
+      I1 --> I2[Pseudo-time / CFL ramp<br/>updateCflRamp<br/>log pseudo-dt stats]
+      I2 --> I3[Pressure correction<br/>assemble A_p, b_p<br/>Direct (LDLT) or SOR<br/>cache mapping/factor]
+      I3 --> I4[Velocity correction<br/>apply dP<br/>BCs]
+      I4 --> I5[Residuals & dP<br/>core/full planes]
+      I5 --> I6[Logging/output<br/>residuals.txt<br/>dp_history.txt<br/>console row<br/>checkpoint optional]
+      I6 --> I7[Convergence check<br/>(residuals or dP window)]
     end
 
     I7 -->|not done| C2
-    I7 -->|done| C3[Finalize\nsample final planes\nprint summary\nsaveAll fields/VTK]
+    I7 -->|done| C3[Finalize<br/>sample final planes<br/>print summary<br/>saveAll fields/VTK]
   end
 
-  C3 --> D[Outputs (ExportFiles/)\nresiduals.txt, pressure_drop_history.txt\nu/v/p txt, VTK, PNGs]
+  C3 --> D[Outputs (ExportFiles/)<br/>residuals.txt, pressure_drop_history.txt<br/>u/v/p txt, VTK, PNGs]
 
-  D --> E[PlotResiduals.py\nplot residuals & dP\nsave PNG\ninteractive zoom if matplotlib]
+  D --> E[PlotResiduals.py<br/>plot residuals & dP<br/>save PNG<br/>interactive zoom if matplotlib]
 
   D --> F[Optional Thermal]
-  subgraph Thermal Post
-    F --> F1[main.py (Carlos Goni Gill)\nload thermal params/fields\ncall HeatTransferSolver]
-    F1 --> F2[heat_solver.py (Carlos Goni Gill)\nconjugate two-layer solve\nwrite thermal_results.vtk]
+  subgraph THERMAL[Thermal Post]
+    F --> F1[main.py (Carlos Goni Gill)<br/>load thermal params/fields<br/>call HeatTransferSolver]
+    F1 --> F2[heat_solver.py (Carlos Goni Gill)<br/>conjugate two-layer solve<br/>write thermal_results.vtk]
   end
 ```
