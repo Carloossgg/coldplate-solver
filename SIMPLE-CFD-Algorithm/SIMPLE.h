@@ -1,3 +1,10 @@
+// File: SIMPLE.h
+// Author: Peter Tcherkezian
+// Description: Core interface and parameters for the incompressible laminar SIMPLE/SIMPLEC solver on a structured grid.
+//              Central registry of all solver controls (relaxation, CFL/pseudo-time ramps, scheme toggles), staggered
+//              field storage, boundary/geometry inputs, and helper declarations used by Utilities/*. Adjust physics or
+//              numerics (SIMPLE vs SIMPLEC, FOU vs SOU, direct vs SOR) here; implementations live in SIMPLE.cpp and
+//              Utilities/.
 #pragma once
 
 #include <iostream>
@@ -22,7 +29,7 @@ public:
     int    maxIterations = 100000;  // More iterations for complex geometries
     
     // Output control
-    int    saveStateInterval = 300;  // Save state (checkpoint) every N iterations (0 = disable checkpoints)
+    int    saveStateInterval = 600;  // Save state (checkpoint) every N iterations (0 = disable checkpoints)
     
     // Restart control
     bool   reuseInitialFields = false;  // Load previous solution as initial guess
@@ -36,9 +43,9 @@ public:
     // Full system planes are auto-calculated: inlet=0.0, outlet=N*hx (domain boundaries)
 
     // Pressure drop convergence (fluid region only)
-    bool   usePressureDropConvergence = false;   // Enable pressure drop based convergence
-    int    dpConvergenceWindow = 10000;           // Number of iterations to look back
-    double dpConvergencePercent = 1.0;         // Converged if change < this % over window
+    bool   usePressureDropConvergence = true;   // Enable pressure drop based convergence
+    int    dpConvergenceWindow = 1000;           // Number of iterations to look back
+    double dpConvergencePercent = 10.0;         // Converged if change < this % over window
     bool   usePressureDropSlopeGate = false;    // Additional slope-based gate
     int    dpSlopeWindowIters = 1000;          // Window length for slope check
     double dpSlopeMaxDelta   = 10.0;           // Max allowed Δp change (Pa) over slope window
@@ -57,11 +64,7 @@ public:
     double pTol = 1e-4;            // Absolute tolerance for pressure correction convergence - only used if useDirectPressureSolver = false
 
     // Convection scheme: 0 = first-order upwind, 1 = second-order upwind (SOU)
-    // Second-order upwind reduces numerical diffusion significantly
     int convectionScheme = 0;      // 0 = first-order upwind, 1 = second-order upwind  (SOU)
-    
-    // Under-relaxation (may need to reduce for SOU stability)
-    // double uvAlpha = 0.5;       // Consider reducing if SOU causes oscillations
 
     // Pseudo-transient time step control
     double timeStepMultiplier = 0.01; // multiplier for Lx/U when computing pseudo dt (adjusting the global time step)
@@ -109,8 +112,8 @@ public:
     bool   enableInletRamp  = false;   // Toggle inlet velocity ramping
     int    rampSteps        = 1000;   // Ramp duration in SIMPLE iterations
     // Under-relaxation factors tuned for SIMPLE
-    double uvAlpha = 0.7;    // velocity relaxation 
-    double pAlpha  = 0.3;    // pressure relaxation 
+    double uvAlpha = 0.5;    // velocity relaxation 
+    double pAlpha  = 0.2;    // pressure relaxation 
 
     // Residuals
     double residU    = 1.0;
@@ -155,9 +158,6 @@ public:
     std::vector<bool> isFluidP;   // true if p(i,j) is in fluid region
     void buildFluidMasks();       // Called after loading geometry
 
-    // Diffusion coefficient (unused, kept for compatibility)
-    double D = eta;
-
     // Constructor and initialization
     SIMPLE();
     void loadParameters(const std::string& paramsFile);
@@ -166,6 +166,10 @@ public:
     // Main solver
     void runIterations();
     double calculateStep(int& pressureIterations);
+
+    // Solver subcomponents (implemented in Utilities/*.cpp)
+    bool solvePressureSystem(int& pressureIterations, double& localResidMass);
+    void updateCflRamp(double currRes);
 
     // Geometry
     void loadTopology(const std::string& fileName);
@@ -180,11 +184,79 @@ public:
     // Output
     void saveAll();
     void saveMatrix(Eigen::MatrixXd inputMatrix, std::string fileName);
+    void initLogFiles(std::ofstream& residFile, std::ofstream& dpFile);
+    void printIterationHeader() const;
+    void writeIterationLogs(std::ofstream& residFile,
+                            std::ofstream& dpFile,
+                            int iter,
+                            double corePressureDrop,
+                            double fullPressureDrop,
+                            double coreStaticDrop,
+                            double fullStaticDrop);
+    void printIterationRow(int iter,
+                           double residMassVal,
+                           double residUVal,
+                           double residVVal,
+                           double maxTransRes,
+                           double corePressureDrop,
+                           double fullPressureDrop,
+                           double iterTimeMs,
+                           int pressureIterations) const;
+    void printStaticDp(int iter,
+                       double coreStaticDrop,
+                       double fullStaticDrop) const;
 
-    // Utilities
-    double takeMax(double A, double B);
-    double takeMax(double A, double B, double C);
 };
+
+// Inline helpers (masks and alpha lookups)
+inline bool fluidU(const SIMPLE& s, int i, int j) {
+    return s.isFluidU[i * s.N + j];
+}
+
+inline bool fluidV(const SIMPLE& s, int i, int j) {
+    return s.isFluidV[i * (s.N + 1) + j];
+}
+
+inline bool fluidP(const SIMPLE& s, int i, int j) {
+    return s.isFluidP[i * (s.N + 1) + j];
+}
+
+inline double alphaAtU(const SIMPLE& s, int i, int j) {
+    const auto& alpha = s.alpha;
+    const int M = s.M;
+    const int N = s.N;
+    if (i < 1 || i >= M || j < 1 || j >= N - 1) return 0.0;
+    int ci = i - 1;
+    int cj1 = j - 1;
+    int cj2 = j;
+    if (ci < 0 || ci >= alpha.rows()) return 0.0;
+    if (cj1 < 0 || cj1 >= alpha.cols()) return 0.0;
+    if (cj2 < 0 || cj2 >= alpha.cols()) return alpha(ci, cj1);
+    return 0.5 * (alpha(ci, cj1) + alpha(ci, cj2));
+}
+
+inline double alphaAtV(const SIMPLE& s, int i, int j) {
+    const auto& alpha = s.alpha;
+    const int M = s.M;
+    const int N = s.N;
+    if (i < 1 || i >= M - 1 || j < 1 || j >= N) return 0.0;
+    int ci1 = i - 1;
+    int ci2 = i;
+    int cj = j - 1;
+    if (cj < 0 || cj >= alpha.cols()) return 0.0;
+    if (ci1 < 0 || ci1 >= alpha.rows()) return 0.0;
+    if (ci2 < 0 || ci2 >= alpha.rows()) return alpha(ci1, cj);
+    return 0.5 * (alpha(ci1, cj) + alpha(ci2, cj));
+}
+
+// Convection (SOU deferred corrections)
+double computeSOUCorrectionU(const SIMPLE& s, int i, int j,
+                             double Fe, double Fw, double Fn, double Fs);
+double computeSOUCorrectionV(const SIMPLE& s, int i, int j,
+                             double Fe, double Fw, double Fn, double Fs);
+
+// Time-control logging
+void logPseudoStats(const SIMPLE& solver, const char* label, const SIMPLE::PseudoDtStats& stats);
 
 // ============================================================================
 // Post-processing: Physical location-based pressure sampling (postprocessing.cpp)

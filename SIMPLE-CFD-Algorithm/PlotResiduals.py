@@ -1,12 +1,21 @@
+"""
+File: PlotResiduals.py
+Author: Peter Tcherkezian
+Description: Interactive plotting of residuals and pressure-drop histories from ExportFiles outputs:
+  loads residual and pressure-drop histories, produces semilogy residual plots and pressure-drop trends, saves PNGs,
+  and supports interactive zoom/pan when matplotlib is available.
+"""
+
 try:
     import matplotlib.pyplot as plt  # type: ignore
 except ImportError:  # pragma: no cover - handled at runtime
     plt = None
+
 import os
 import sys
 
-# Modified function signature to accept min/max for pressure
-def plot_residuals(dp_min=None, dp_max=None):
+# Plot residuals and pressure drop
+def plot_residuals():
     if plt is None:
         print("Error: matplotlib is not available. Install it to plot residuals.")
         return
@@ -79,7 +88,7 @@ def plot_residuals(dp_min=None, dp_max=None):
                         dp_full_values.append(float(parts[2]))
         
         # --- PLOT 1: RESIDUALS ---
-        plt.figure(figsize=(10, 6))
+        resid_fig = plt.figure(figsize=(10, 6))
         plt.semilogy(iters, mass_res, label='Mass (Continuity)', linewidth=1.5, color='black')
         plt.semilogy(iters, u_res, label='U-Momentum', linewidth=1.5, linestyle='--', color='blue')
         plt.semilogy(iters, v_res, label='V-Momentum', linewidth=1.5, linestyle='--', color='red')
@@ -88,20 +97,21 @@ def plot_residuals(dp_min=None, dp_max=None):
         plt.ylabel('Residual (Log Scale)')
         plt.grid(True, which="both", linestyle='-', alpha=0.3)
         plt.legend()
+        plt.tight_layout()
         plt.savefig(output_image, dpi=600)
         print(f"Residual plot saved to {output_image}")
         
         # --- PLOT 2: PRESSURE DROP ---
         if dp_core_iters or dp_full_iters:
-            plt.figure(figsize=(10, 6))
+            dp_fig = plt.figure(figsize=(10, 6))
             plotted = False
             if dp_core_iters:
                 plt.plot(dp_core_iters, dp_core_values, color='green', linewidth=1.5,
-                         label='Core Δp (after inlet buffer)')
+                         label='Core dP (after inlet buffer)')
                 plotted = True
             if dp_full_iters:
                 plt.plot(dp_full_iters, dp_full_values, color='orange', linewidth=1.5,
-                         linestyle='--', label='Full-system Δp')
+                         linestyle='--', label='Full-system dP')
                 plotted = True
 
             if plotted:
@@ -110,35 +120,18 @@ def plot_residuals(dp_min=None, dp_max=None):
                 plt.ylabel('Total Pressure Drop (Pa)')
                 plt.grid(True, linestyle='-', alpha=0.3)
                 
-                # --- NEW: APPLY MANUAL SCALING ---
-                # This checks if the user provided limits in the function call
-                if dp_min is not None:
-                    plt.ylim(bottom=dp_min)
-                if dp_max is not None:
-                    plt.ylim(top=dp_max)
-                # ---------------------------------
-
                 plt.legend()
+                plt.tight_layout()
                 plt.savefig(dp_image, dpi=600)
                 print(f"Pressure drop plot saved to {dp_image}")
             else:
                 print("Warning: No pressure-drop data found to plot.")
         
+        # Matplotlib GUI already supports pan/zoom with the toolbar
         plt.show()  # Remove if running on a server without display
         
     except Exception as e:
         print(f"An error occurred during plotting: {e}")
 
 if __name__ == "__main__":
-    # ==========================================
-    #           USER CONFIGURATION
-    # ==========================================
-    # Set these to numbers (e.g., 5000) to lock the axis. 
-    # Set to None to let Python decide automatically.
-    
-    SET_MIN_PRESSURE = None   # e.g., 6000
-    SET_MAX_PRESSURE = None   # e.g., 8000
-
-    # ==========================================
-    
-    plot_residuals(dp_min=SET_MIN_PRESSURE, dp_max=SET_MAX_PRESSURE)
+    plot_residuals()

@@ -1,3 +1,11 @@
+"""
+File: GeometryGenerator.py
+Author: Peter Tcherkezian
+Description: Generates structured channel geometry and fluid parameter exports for the SIMPLE CFD solver:
+  defines physical dimensions and channel layout, discretizes to a structured grid, and writes geometry/fluid property
+  text files to ExportFiles/ for the C++ solver and downstream plotting.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -16,7 +24,7 @@ Ly_total    = 0.030      # 30 mm Total Height
 
 # Channel Features
 w_channel    = 0.0010    # 1.0 mm Channel Width (Exact)
-num_channels = 10        # Number of channels
+num_channels = 20        # Number of channels
 
 # Pitch (Distance between channel centers)
 # Evenly spaced in Y
@@ -28,11 +36,9 @@ pitch = Ly_total / num_channels
 inlet_channel_extension_frac = 1 
 inlet_plenum_fraction = max(0.0, min(1.0, 1.0 - inlet_channel_extension_frac))
 
-# Fluid Properties
+# Flow settings (rho/eta fixed in SIMPLE.h; not exported from here)
 U_inlet_phys = 1       # m/s
-rho_phys     = 997.0     # kg/m^3
-eta_phys     = 0.00089   # Pa.s
-nu_phys      = eta_phys / rho_phys
+# Reference fluid properties (for documentation): rho=997 kg/m^3, eta=0.00089 Pa.s
 HeatFlux     = 100.0     # W/cm^2
 
 # =============================================================================
@@ -42,7 +48,7 @@ HeatFlux     = 100.0     # W/cm^2
 # Factor 1 = Base Resolution (e.g., 5 cells across channel)
 # Factor 4 = High Resolution (e.g., 20 cells across channel)
 
-REFINEMENT_FACTOR = 4  # <--- CHANGE THIS TO 1, 2, 4, 8
+REFINEMENT_FACTOR = 8  # <--- CHANGE THIS TO 1, 2, 4, 8
 
 # Base resolution: How many cells minimum to resolve 1.0 mm channel?
 BASE_CELLS_PER_CHANNEL = 5 
@@ -134,7 +140,8 @@ if not os.path.exists(OUTPUT_DIR):
 
 # 1. fluid_params.txt
 with open(os.path.join(OUTPUT_DIR, "fluid_params.txt"), "w") as f:
-    f.write(f"{M_total} {N_total} {dy:.9f} {dx:.9f} {U_inlet_phys} {N_inlet} {N_outlet} {rho_phys} {nu_phys}")
+    # Columns: M N dy dx U_inlet N_inlet N_outlet (rho/eta are hardcoded in SIMPLE.h)
+    f.write(f"{M_total} {N_total} {dy:.9f} {dx:.9f} {U_inlet_phys} {N_inlet} {N_outlet}")
 
 # 2. geometry_fluid.txt
 np.savetxt(os.path.join(OUTPUT_DIR, "geometry_fluid.txt"), geometry, fmt='%d', delimiter='\t')

@@ -1,3 +1,11 @@
+"""
+File: main.py
+Author: Carlos Goni Gill
+Description: Driver for thermal post-processing; loads flow/geometry exports from ExportFiles/ and calls the
+  conjugate heat transfer solver to produce thermal VTK outputs (fluid/substrate temperatures, pressure, velocity
+  magnitude, vectors).
+"""
+
 import numpy as np
 import sys
 import os

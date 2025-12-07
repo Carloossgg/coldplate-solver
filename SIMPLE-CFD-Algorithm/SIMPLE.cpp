@@ -1,3 +1,10 @@
+// File: SIMPLE.cpp
+// Author: Peter Tcherkezian
+// Description: Implements the SIMPLE/SIMPLEC steady laminar solver workflow:
+//   - loads parameters/geometry, allocates staggered fields and masks
+//   - runs the outer iteration: U/V momentum assembly/solve, pressure correction, velocity correction
+//   - applies pseudo-time/CFL ramps, monitors residuals/pressure drops, logs/prints iteration data
+//   - handles checkpoints and final summaries/field saves
 #include "SIMPLE.h"
 #include <cstdlib>
 #include <iomanip>
@@ -30,6 +37,14 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     if (!(in >> M >> N >> hy >> hx >> targetVel >> N_in_buffer >> N_out_buffer)) {
         std::cerr << "Error: Invalid parameter file format." << std::endl;
         exit(1);
+    }
+
+    // Ignore any extra columns (e.g., rho/nu) to enforce SIMPLE.h fluid properties
+    double ignoredRho = 0.0, ignoredNu = 0.0;
+    if (in >> ignoredRho >> ignoredNu) {
+        std::cout << "Ignoring fluid properties in " << fileName
+                  << "; using SIMPLE.h defaults (rho=" << rho
+                  << ", eta=" << eta << ")." << std::endl;
     }
 
     double domainLength = N * hx;
@@ -148,32 +163,8 @@ void SIMPLE::runIterations() {
     int iter = 0;
     double error = 1.0;
 
-    // Output file for residuals
-    std::ofstream residFile("ExportFiles/residuals.txt");
-    residFile << "Iter MassResid UResid VResid Core_dP_AfterInletBuffer(Pa) "
-              << "Full_dP_FullSystem(Pa)" << std::endl;
-    std::ofstream dpFile("ExportFiles/pressure_drop_history.txt");
-    dpFile << "Iter Core_Total(Pa) Full_Total(Pa) Core_Static(Pa) Full_Static(Pa)" << std::endl;
-
-    std::cout << "Starting simulation..." << std::endl;
-    std::cout << std::setw(8) << "Iter"
-              << std::setw(14) << "Mass"
-              << std::setw(14) << "U-vel"
-              << std::setw(14) << "V-vel"
-              << std::setw(14) << "TransRes"
-              << std::setw(16) << "Core dP (Pa)"
-              << std::setw(16) << "Full dP (Pa)"
-              << std::setw(10) << "Time (ms)"
-              << std::setw(6) << "P-It" << std::endl;
-    std::cout << std::string(122, '-') << std::endl;
-
-    auto logPseudoStats = [&](const char* label, const PseudoDtStats& stats) {
-        if (!enablePseudoTimeStepping || !useLocalPseudoTime || !stats.valid) return;
-        std::cout << "        Pseudo-dt " << label << " [min/avg/max] = "
-                  << std::scientific << std::setprecision(3)
-                  << stats.min << " / " << stats.avg << " / " << stats.max
-                  << "  (samples=" << stats.samples << ")" << std::defaultfloat << std::endl;
-    };
+    std::ofstream residFile, dpFile;
+    initLogFiles(residFile, dpFile);
 
     // ============================================================
     // Physical location-based pressure sampling planes
@@ -195,8 +186,8 @@ void SIMPLE::runIterations() {
     std::cout << "  Core outlet:  x = " << xCoreOut * 1000.0 << " mm" << std::endl;
     std::cout << "  Full inlet:   x = " << xFullIn * 1000.0 << " mm (domain start)" << std::endl;
     std::cout << "  Full outlet:  x = " << xFullOut * 1000.0 << " mm (domain end)" << std::endl;
-    std::cout << "  -> Core Δp = user-defined core region" << std::endl;
-    std::cout << "  -> Full Δp = entire domain (inlet to outlet)" << std::endl;
+    std::cout << "  -> Core dP = user-defined core region" << std::endl;
+    std::cout << "  -> Full dP = entire domain (inlet to outlet)" << std::endl;
     std::cout << std::defaultfloat;
     
     // Pressure drop convergence tracking (circular buffer for window)
@@ -243,32 +234,7 @@ void SIMPLE::runIterations() {
         int pressureIterations = 0;
         error = calculateStep(pressureIterations);
 
-        // ------------------------------------------------------------------
-        // CFL ramping logic (residual-based) - updates pseudoCFL in-place
-        // ------------------------------------------------------------------
-        if (enablePseudoTimeStepping && enableCflRamp) {
-            // We use mass residual as the ramp driver
-            double currRes = std::max(residMass, 1e-12);
-
-            // Before ramp start: hold CFL at initial value
-            if (currRes > cflRampStartRes) {
-                pseudoCFL = pseudoCFLInitial;
-            } else {
-                // Ramp phase: increase CFL as residual drops
-                double ratio    = cflRampStartRes / currRes;
-                double rawFactor = std::pow(ratio, cflRampExponent);
-                double targetCFL = std::min(pseudoCFLInitial * rawFactor, pseudoCFLMax);
-
-                // Smooth update to avoid sudden jumps
-                pseudoCFL = (1.0 - cflRampSmooth) * pseudoCFL
-                          +  cflRampSmooth         * targetCFL;
-
-                // Safety guard
-                if (!std::isfinite(pseudoCFL) || pseudoCFL <= 0.0) {
-                    pseudoCFL = pseudoCFLInitial;
-                }
-            }
-        }
+        updateCflRamp(residMass);
         
         auto iterEnd = std::chrono::high_resolution_clock::now();
         double iterTimeMs = std::chrono::duration<double, std::milli>(iterEnd - iterStart).count();
@@ -344,42 +310,20 @@ void SIMPLE::runIterations() {
         }
 
         // Write to files
-        residFile << iter << " "
-                  << residMass << " "
-                  << residU << " "
-                  << residV << " "
-                  << corePressureDrop << " "
-                  << fullPressureDrop << std::endl;
-        dpFile << iter << " "
-               << corePressureDrop << " "
-               << fullPressureDrop << " "
-               << coreStaticDrop << " "
-               << fullStaticDrop << std::endl;
+        writeIterationLogs(residFile, dpFile, iter,
+                           corePressureDrop, fullPressureDrop,
+                           coreStaticDrop, fullStaticDrop);
 
-        // Print to console every 10 iterations
-        // TransRes = max(transientResidU, transientResidV) - should → 0 at true steady state
+        // Print to console every iteration
         double maxTransRes = std::max(transientResidU, transientResidV);
-        if (iter % 10 == 0 || iter < 10) {
-            std::cout << std::setw(8) << iter
-                      << std::setw(14) << std::scientific << std::setprecision(3) << residMass
-                      << std::setw(14) << residU
-                      << std::setw(14) << residV
-                      << std::setw(14) << maxTransRes
-                      << std::setw(16) << std::fixed << std::setprecision(1) << corePressureDrop
-                      << std::setw(16) << fullPressureDrop
-                      << std::setw(10) << std::fixed << std::setprecision(1) << iterTimeMs
-                      << std::setw(6) << pressureIterations
-                      << std::endl;
-            // Print static pressure drop on separate line for comparison (every 100 iterations)
-            if (iter % 100 == 0 || iter < 10) {
-                std::cout << "         Static Δp (Core/Full): " 
-                          << std::setw(12) << std::fixed << std::setprecision(1) << coreStaticDrop << " / "
-                          << std::setw(12) << fullStaticDrop << " Pa"
-                          << std::endl;
-            }
-            logPseudoStats("U", pseudoStatsU);
-            logPseudoStats("V", pseudoStatsV);
+        printIterationRow(iter, residMass, residU, residV, maxTransRes,
+                          corePressureDrop, fullPressureDrop,
+                          iterTimeMs, pressureIterations);
+        if (iter % 100 == 0 || iter < 10) {
+            printStaticDp(iter, coreStaticDrop, fullStaticDrop);
         }
+        logPseudoStats(*this, "U", pseudoStatsU);
+        logPseudoStats(*this, "V", pseudoStatsV);
 
         // Checkpoints
         if (saveStateInterval > 0 && iter > 0 && iter % saveStateInterval == 0) {
@@ -429,32 +373,32 @@ void SIMPLE::runIterations() {
     std::cout << "Final residuals: Mass=" << std::scientific << residMass
               << " U=" << residU << " V=" << residV << std::endl;
     std::cout << std::fixed << std::setprecision(1);
-    logPseudoStats("U (final)", pseudoStatsU);
-    logPseudoStats("V (final)", pseudoStatsV);
+    logPseudoStats(*this, "U (final)", pseudoStatsU);
+    logPseudoStats(*this, "V (final)", pseudoStatsV);
     std::cout << "Core region (x=" << std::setprecision(2) << xCoreIn*1000.0 
               << " mm -> x=" << xCoreOut*1000.0 << " mm)" << std::endl;
     std::cout << "  Open inlet area:  " << coreInletFinal.flowArea << " m^2 (per unit depth)" << std::endl;
     std::cout << "  Open outlet area: " << coreOutletFinal.flowArea << " m^2 (per unit depth)" << std::endl;
-    std::cout << "  Static Δp:        " << coreStaticDrop << " Pa (" 
+    std::cout << "  Static dP:        " << coreStaticDrop << " Pa (" 
               << coreStaticDrop/1000.0 << " kPa)" << std::endl;
     std::cout << "  Dynamic p (in/out): " << coreInletFinal.avgDynamic << " Pa | "
               << coreOutletFinal.avgDynamic << " Pa" << std::endl;
     std::cout << "  Total (mass-weighted, in/out): " << coreInletFinal.avgTotal << " Pa | "
               << coreOutletFinal.avgTotal << " Pa" << std::endl;
-    std::cout << "  TOTAL Δp (core):  " << coreTotalDrop << " Pa (" 
+    std::cout << "  TOTAL dP (core):  " << coreTotalDrop << " Pa (" 
               << coreTotalDrop/1000.0 << " kPa)" << std::endl;
     std::cout << std::endl;
     std::cout << "Full system (x=" << std::setprecision(2) << xFullIn*1000.0 
               << " mm -> x=" << xFullOut*1000.0 << " mm)" << std::endl;
     std::cout << "  Open inlet area:  " << fullInletFinal.flowArea << " m^2 (per unit depth)" << std::endl;
     std::cout << "  Open outlet area: " << fullOutletFinal.flowArea << " m^2 (per unit depth)" << std::endl;
-    std::cout << "  Static Δp:        " << fullStaticDrop << " Pa (" 
+    std::cout << "  Static dP:        " << fullStaticDrop << " Pa (" 
               << fullStaticDrop/1000.0 << " kPa)" << std::endl;
     std::cout << "  Dynamic p (in/out): " << fullInletFinal.avgDynamic << " Pa | "
               << fullOutletFinal.avgDynamic << " Pa" << std::endl;
     std::cout << "  Total (mass-weighted, in/out): " << fullInletFinal.avgTotal << " Pa | "
               << fullOutletFinal.avgTotal << " Pa" << std::endl;
-    std::cout << "  TOTAL Δp (full):  " << fullTotalDrop << " Pa (" 
+    std::cout << "  TOTAL dP (full):  " << fullTotalDrop << " Pa (" 
               << fullTotalDrop/1000.0 << " kPa)" << std::endl;
     std::cout << "Results saved to ExportFiles/" << std::endl;
     std::cout << std::string(106, '=') << std::endl;
@@ -512,64 +456,6 @@ void SIMPLE::buildAlphaField() {
 // ------------------------------------------------------------------
 // Build Fluid Masks (Precomputed for Speed)
 // ------------------------------------------------------------------
-void SIMPLE::buildFluidMasks() {
-    // Allocate masks
-    const int uRows = M + 1;
-    const int uCols = N;
-    const int vRows = M;
-    const int vCols = N + 1;
-    const int pRows = M + 1;
-    const int pCols = N + 1;
-
-    isFluidU.resize(uRows * uCols, false);
-    isFluidV.resize(vRows * vCols, false);
-    isFluidP.resize(pRows * pCols, false);
-
-    // Helper to check if a pressure cell (i,j) is solid
-    // Pressure grid is (M+1) x (N+1), cellType is M x N
-    // Pressure cell (i,j) corresponds to cellType(i-1, j-1)
-    auto isSolid = [&](int i, int j) -> bool {
-        int ci = i - 1;
-        int cj = j - 1;
-        if (ci < 0 || ci >= M || cj < 0 || cj >= N) return false;
-        return cellType(ci, cj) != 0;
-    };
-
-    // Build U mask: u(i,j) is fluid if both adjacent pressure cells are fluid
-    // u is at east face of cell (i,j), between p(i,j) and p(i,j+1)
-    for (int i = 0; i < uRows; ++i) {
-        for (int j = 0; j < uCols; ++j) {
-            bool solid = isSolid(i, j) || isSolid(i, j + 1);
-            isFluidU[i * uCols + j] = !solid;
-        }
-    }
-
-    // Build V mask: v(i,j) is fluid if both adjacent pressure cells are fluid
-    // v is at north face of cell (i,j), between p(i,j) and p(i+1,j)
-    for (int i = 0; i < vRows; ++i) {
-        for (int j = 0; j < vCols; ++j) {
-            bool solid = isSolid(i, j) || isSolid(i + 1, j);
-            isFluidV[i * vCols + j] = !solid;
-        }
-    }
-
-    // Build P mask: p(i,j) is fluid if corresponding cellType is fluid
-    for (int i = 0; i < pRows; ++i) {
-        for (int j = 0; j < pCols; ++j) {
-            isFluidP[i * pCols + j] = !isSolid(i, j);
-        }
-    }
-
-    // Count for diagnostics
-    int fluidU = 0, fluidV = 0, fluidP = 0;
-    for (bool b : isFluidU) if (b) fluidU++;
-    for (bool b : isFluidV) if (b) fluidV++;
-    for (bool b : isFluidP) if (b) fluidP++;
-    std::cout << "Fluid masks: U=" << fluidU << "/" << isFluidU.size()
-              << ", V=" << fluidV << "/" << isFluidV.size()
-              << ", P=" << fluidP << "/" << isFluidP.size() << std::endl;
-}
-
 // ------------------------------------------------------------------
 // Main Entry Point
 // ------------------------------------------------------------------

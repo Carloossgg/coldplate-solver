@@ -1,5 +1,9 @@
 """
-Two-Layer Heat Transfer Solver for Microchannel Heat Sink Topology Optimization
+File: heat_solver.py
+Author: Carlos Goni Gill
+Description: Two-layer conjugate heat transfer solver for thermal post-processing of SIMPLE flow outputs:
+  assembles coupled finite-volume matrices for fluid (top) and substrate (bottom) layers with advection from flow
+  fields, solves the sparse system, and returns fluid/substrate temperatures plus compliance metrics and VTK output.
 """
 
 import numpy as np
