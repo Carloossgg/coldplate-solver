@@ -1,3 +1,8 @@
+// File: Utilities/output.cpp
+// Author: Peter Tcherkezian
+// Description: Console/file output utilities:
+//   formats per-iteration console rows, static pressure-drop traces, and writes residual/pressure histories to disk;
+//   also saves field snapshots (u, v, p) and postprocessing metrics for downstream plotting.
 #include "SIMPLE.h"
 #include <iomanip>
 
@@ -128,6 +133,80 @@ void SIMPLE::saveAll()
     }
 
     std::cout << "Data saved to ExportFiles/" << std::endl;
+}
+
+void SIMPLE::initLogFiles(std::ofstream& residFile, std::ofstream& dpFile) {
+    residFile.open("ExportFiles/residuals.txt");
+    dpFile.open("ExportFiles/pressure_drop_history.txt");
+    residFile << "Iter MassResid UResid VResid Core_dP_AfterInletBuffer(Pa) "
+              << "Full_dP_FullSystem(Pa)" << std::endl;
+    dpFile << "Iter Core_Total(Pa) Full_Total(Pa) Core_Static(Pa) Full_Static(Pa)" << std::endl;
+    printIterationHeader();
+}
+
+void SIMPLE::printIterationHeader() const {
+    std::cout << "Starting simulation..." << std::endl;
+    std::cout << std::setw(8) << "Iter"
+              << std::setw(14) << "Mass"
+              << std::setw(14) << "U-vel"
+              << std::setw(14) << "V-vel"
+              << std::setw(14) << "TransRes"
+              << std::setw(16) << "Core dP (Pa)"
+              << std::setw(16) << "Full dP (Pa)"
+              << std::setw(10) << "Time (ms)"
+              << std::setw(6) << "P-It" << std::endl;
+    std::cout << std::string(122, '-') << std::endl;
+}
+
+void SIMPLE::writeIterationLogs(std::ofstream& residFile,
+                                std::ofstream& dpFile,
+                                int iter,
+                                double corePressureDrop,
+                                double fullPressureDrop,
+                                double coreStaticDrop,
+                                double fullStaticDrop) {
+    residFile << iter << " "
+              << residMass << " "
+              << residU << " "
+              << residV << " "
+              << corePressureDrop << " "
+              << fullPressureDrop << std::endl;
+
+    dpFile << iter << " "
+           << corePressureDrop << " "
+           << fullPressureDrop << " "
+           << coreStaticDrop << " "
+           << fullStaticDrop << std::endl;
+}
+
+void SIMPLE::printIterationRow(int iter,
+                               double residMassVal,
+                               double residUVal,
+                               double residVVal,
+                               double maxTransRes,
+                               double corePressureDrop,
+                               double fullPressureDrop,
+                               double iterTimeMs,
+                               int pressureIterations) const {
+    std::cout << std::setw(8) << iter
+              << std::setw(14) << std::scientific << std::setprecision(3) << residMassVal
+              << std::setw(14) << residUVal
+              << std::setw(14) << residVVal
+              << std::setw(14) << maxTransRes
+              << std::setw(16) << std::fixed << std::setprecision(1) << corePressureDrop
+              << std::setw(16) << fullPressureDrop
+              << std::setw(10) << std::fixed << std::setprecision(1) << iterTimeMs
+              << std::setw(6) << pressureIterations
+              << std::endl;
+}
+
+void SIMPLE::printStaticDp(int iter,
+                           double coreStaticDrop,
+                           double fullStaticDrop) const {
+    std::cout << "         Static dP (Core/Full): " 
+              << std::setw(12) << std::fixed << std::setprecision(1) << coreStaticDrop << " / "
+              << std::setw(12) << fullStaticDrop << " Pa"
+              << std::endl;
 }
 
 void SIMPLE::paintBoundaries() {

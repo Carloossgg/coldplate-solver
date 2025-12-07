@@ -1,6 +1,8 @@
-// postprocessing.cpp
-// Physical location-based pressure and velocity sampling with linear interpolation
-// This module handles pressure drop calculations at user-specified physical x-coordinates
+// File: Utilities/postprocessing.cpp
+// Author: Peter Tcherkezian
+// Description: Physical-location sampling of pressure/velocity:
+//   interpolates staggered-grid fields onto user-specified x-planes to report core/full pressure drops, areas,
+//   and mass-flow-weighted pressures for summaries.
 
 #include "../SIMPLE.h"
 #include <iostream>

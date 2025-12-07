@@ -1,3 +1,8 @@
+// File: Utilities/boundaries.cpp
+// Author: Peter Tcherkezian
+// Description: Boundary condition utilities for velocity and pressure:
+//   - applies inlet/outlet/wall conditions on staggered U/V and cell-centered P
+//   - provides boundary-type queries used during assembly, pressure solve, and correction steps
 #include "SIMPLE.h"
 
 // ----------------------------------------------------------
@@ -29,20 +34,7 @@ void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXd& uIn,
         vIn(M - 1, j) = 0.0;    // v on top faces
     }
 
-    // ---------------------------
-    // Left boundary (x = 0): velocity inlet
-    //
-    // Apply Uin ONLY where the inlet column of the geometry is fluid.
-    // geometry_fluid: 0 = fluid, 1 = solid
-    // We loaded that into cellType: 0 = fluid, 1 = solid.
-    //
-    // u is (M+1) x N, with u(i, j) at the east face of cell (i-1, j-1) in cellType.
-    // For the inlet (j=0), u(i, 0) is at the west boundary.
-    // The cell to the right of this face is cellType(i-1, 0).
-    //
-    // We loop over i = 1 to M-1 (interior faces, not touching top/bottom walls).
-    // For each i, check if cellType(i-1, 0) is fluid.
-    // ---------------------------
+    // Left boundary (x = 0): set inlet velocity only on fluid cells
     for (int i = 1; i < M; ++i) {
         const int cellRow = i - 1;  // Corresponding row in cellType
         if (cellRow >= 0 && cellRow < static_cast<int>(cellType.rows()) && cellType(cellRow, 0) == 0) {
@@ -70,28 +62,6 @@ void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXd& uIn,
         vIn(i, N) = vIn(i, N - 1);       // dv/dx ≈ 0
     }
 
-    // ---------------------------
-    // INTERNAL OBSTACLES (OPTIONAL)
-    //
-    // Right now, solids inside the domain are handled via the alpha
-    // (Brinkman) term in the momentum equation. If, later, you want
-    // hard no-slip in solid cells instead of Brinkman penalization,
-    // you can enforce u = v = 0 where cellType == 1 here.
-    //
-    // Example (commented out on purpose):
-    //
-    // for (int i = 1; i < M; ++i) {
-    //     for (int j = 1; j < N; ++j) {
-    //         if (cellType(i, j) == 1) {
-    //             if (j < N)  uIn(i, j) = 0.0;
-    //             if (j <= N) vIn(i, j) = 0.0;
-    //         }
-    //     }
-    // }
-    //
-    // Keeping this OFF ensures we only did what you requested:
-    // correcting the inlet BC using geometry_fluid.
-    // ---------------------------
 }
 
 // ----------------------------------------------------------
