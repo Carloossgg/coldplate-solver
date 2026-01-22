@@ -4,37 +4,64 @@
 Laminar, incompressible SIMPLE solver on a structured Cartesian grid (finite volume, steady-state with pseudo-transient relaxation). Geometry, fluid fields, and postprocessing are all contained in this repo; no external CFD suite needed.
 
 ## Components (key files)
-- `SIMPLE.h / SIMPLE.cpp`: solver parameters and main driver.
-- `Utilities/iterations.cpp`: momentum + correction loop (calls helpers below).
-- `Utilities/pressure_solver.cpp`: pressure correction (direct SimplicialLDLT or SOR fallback).
-- `Utilities/convection.cpp`: SOU deferred corrections.
-- `Utilities/masks.cpp`: fluid/solid masks and alpha lookups.
-- `Utilities/time_control.cpp`: pseudo time-stepping, CFL ramp, pseudo-dt stats logging.
-- `Utilities/boundaries.cpp`: velocity/pressure boundary conditions.
-- `Utilities/output.cpp`: I/O for residuals, pressure drop histories, field saves.
-- `Utilities/postprocessing.cpp`: pressure-drop sampling planes, reporting.
-- `GeometryGenerator.py`: builds geometry and fluid params (writes to `ExportFiles/`).
-- `main.py`: Driver for thermal solver; handles multi-core configuration and parameter loading.
-- `heat_solver.py`: High-performance conjugate heat transfer solver (Vectorized assembly, Parallel BiCGSTAB solver, Unstructured VTK export).
-- `PlotResiduals.py`: interactive plotting of residuals and pressure drops.
+
+### C++ Solver Core
+| File | Description |
+|------|-------------|
+| `SIMPLE.h` | Central registry of all solver parameters, staggered grid fields, and function declarations |
+| `SIMPLE.cpp` | Main driver: initialization, iteration loop, convergence checking, file I/O orchestration |
+
+### C++ Utility Modules
+| File | Description |
+|------|-------------|
+| `Utilities/iterations.cpp` | Single SIMPLE iteration: momentum solve, pressure correction, velocity correction |
+| `Utilities/pressure_solver.cpp` | Pressure Poisson equation solve (Direct LDLT or iterative SOR) |
+| `Utilities/convection.cpp` | Second-order upwind (SOU) deferred corrections for convection |
+| `Utilities/boundaries.cpp` | Inlet/outlet/wall boundary conditions for velocity and pressure |
+| `Utilities/masks.cpp` | Precomputed fluid/solid masks for staggered U/V/P grids |
+| `Utilities/time_control.cpp` | Pseudo-CFL ramping and time-step statistics logging |
+| `Utilities/output.cpp` | File I/O: residuals, pressure history, VTK export, thermal cropping |
+| `Utilities/postprocessing.cpp` | Physical location-based pressure/velocity sampling |
+
+### Thermal Solver
+| File | Description |
+|------|-------------|
+| `ThermalSolver/thermal_solver.cpp` | 3D conjugate heat transfer solver using AMGCL (AMG + IDR(s)) |
+
+### Python Tools
+| File | Description |
+|------|-------------|
+| `GeometryGeneratorV1.py` | Simple straight channel geometry generator |
+| `GeometryGeneratorV2.py` | Random network routing with Manhattan/diagonal paths, split/merge logic |
+| `GeometryGeneratorV3.py` | **Density-based** continuous geometry for topology optimization |
+| `main.py` | Driver for thermal solver; handles parameter loading |
+| `PlotResiduals.py` | Interactive plotting of residuals and pressure drops |
+| `derive_interface.py` | Helper for interface conductance calculations |
+| `StepExporter.py` | Export geometry to STEP format (using gmsh) |
+| `ChannelWidthMeasure.py` | Compute local channel width field via medial axis |
 
 ## Build
-Requires [Eigen](https://eigen.tuxfamily.org/) headers. Example (Windows/MinGW, adjust Eigen path):
+Requires [Eigen](https://eigen.tuxfamily.org/) headers. **Eigen 3.4.0 is included in `Utilities/eigen-3.4.0/`** for portability.
+
+**Windows (MinGW):**
 ```
-g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities\boundaries.cpp Utilities\iterations.cpp Utilities\output.cpp Utilities\postprocessing.cpp Utilities\pressure_solver.cpp Utilities\convection.cpp Utilities\time_control.cpp Utilities\masks.cpp -I. -I"C:\Toolbox Coding\eigen-5.0.0" -O3 -o simple.exe
+g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities\boundaries.cpp Utilities\iterations.cpp Utilities\output.cpp Utilities\postprocessing.cpp Utilities\pressure_solver.cpp Utilities\convection.cpp Utilities\time_control.cpp Utilities\masks.cpp -I. -I"Utilities\eigen-3.4.0" -O3 -o simple.exe
 ```
-On Linux/macOS adjust slashes and Eigen include path:
+
+**Linux/macOS:**
 ```
-g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities/boundaries.cpp Utilities/iterations.cpp Utilities/output.cpp Utilities/postprocessing.cpp Utilities/pressure_solver.cpp Utilities/convection.cpp Utilities/time_control.cpp Utilities/masks.cpp -I. -I/path/to/eigen -O3 -o simple
+g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities/boundaries.cpp Utilities/iterations.cpp Utilities/output.cpp Utilities/postprocessing.cpp Utilities/pressure_solver.cpp Utilities/convection.cpp Utilities/time_control.cpp Utilities/masks.cpp -I. -I"Utilities/eigen-3.4.0" -O3 -o simple
 ```
 
 ## How to run
 1) Generate geometry/params:
 ```
-python GeometryGenerator.py
+python GeometryGeneratorV3.py  # (or V1/V2 depending on needs)
 ```
 This writes `ExportFiles/fluid_params.txt` and geometry matrices.
+
 2) Build (see above) and run the solver (`simple.exe` or `./simple`).
+
 3) Postprocess/plot residuals:
 ```
 python PlotResiduals.py
@@ -42,10 +69,11 @@ python PlotResiduals.py
 Results (fields, histories, VTK) land in `ExportFiles/`.
 
 ## Workflow (quick start)
-- Generate geometry: `python GeometryGenerator.py`
-- Build: g++ command above (adjust Eigen include path)
+- Generate geometry: `python GeometryGeneratorV3.py`
+- Build: g++ command above (uses local Eigen from `Utilities/eigen-3.4.0/`)
 - Run: `./simple.exe` (or `./simple` on *nix)
 - Plot: `python PlotResiduals.py`
+- Thermal: `cd ThermalSolver && ./thermal_solver.exe ../ExportFiles`
 - Inspect outputs in `ExportFiles/` (VTK + text + PNGs)
 
 ## Tuning knobs (SIMPLE.h)
@@ -57,10 +85,45 @@ Results (fields, histories, VTK) land in `ExportFiles/`.
 - Inlet ramp: `enableInletRamp`, `rampSteps`.
 - Optional 2.5D model (two-layer microchannel): set `enableTwoPointFiveD = true`. This activates the **2.5D Pressure Drop Model**, which applies the 6/7 convection scaling and the $-(5\mu/2H_t^2)$ linear sink term to account for out-of-plane drag. `Ht_channel` is read automatically from `ExportFiles/fluid_params.txt`.
 
+## Density-Based Topology Optimization (MMA-ready)
+Based on: *"Topology optimization of microchannel heat sinks using a two-layer model"* (Haertel et al., 2018)
+
+### Overview
+Instead of binary solid/fluid (0/1), the solver supports a **continuous density field** (gamma):
+- `gamma = 1.0` → pure fluid
+- `gamma = 0.0` → pure solid  
+- `0 < gamma < 1` → transition/buffer zone
+
+This enables gradient-based topology optimization (MMA) and prevents numerical issues with abrupt material property changes.
+
+### Brinkman Penalization
+Flow through "solid" regions is penalized via Brinkman friction:
+```
+F(gamma) = -alpha_max * u * I_alpha(gamma)
+I_alpha(gamma) = (1 - gamma) / (1 + b_alpha * gamma)
+```
+- `alpha_max = mu / (Da * L_c^2)` — maximum inverse permeability
+- `b_alpha` — convexity parameter (controls interpolation sharpness)
+- `Da` — Darcy number (lower = more solid-like)
+
+### Parameters (SIMPLE.h)
+- `brinkmanDarcyNumber = 1e-5` — Darcy number (controls Brinkman penalization strength)
+
+### Geometry Files
+- **GeometryGeneratorV1**: Simple straight parallel channels
+- **GeometryGeneratorV2**: Random network routing with split/merge (binary output)
+- **GeometryGeneratorV3**: Density-based with buffer zones (continuous 0.0-1.0)
+
+Output files:
+- `geometry_fluid.txt` — geometry for CFD solver (binary or continuous)
+- `geometry_thermal.txt` — geometry for thermal solver (binary or continuous)
+
+**File convention**: `0 = fluid`, `1 = solid`, intermediate values = buffer/transition zones
+
 ## Inputs & knobs
 - Main parameters live in `SIMPLE.h` (relaxation, CFL ramp, max iterations, convergence eps, ramp steps, etc.).
-- Geometry and mesh come from `GeometryGenerator.py` (refinement, channel layout, buffers).
-- `GeometryGenerator.py` also exports `Ht_channel` (out-of-plane height) for the optional 2.5D physics; no manual C++ edit is needed.
+- Geometry and mesh come from `GeometryGeneratorV*.py` (refinement, channel layout, buffers).
+- `GeometryGenerator*.py` also exports `Ht_channel` (out-of-plane height) for the optional 2.5D physics; no manual C++ edit is needed.
 - Pressure solver: toggle direct vs SOR in `SIMPLE.h` (`useDirectPressureSolver`), SIMPLE vs SIMPLEC (`useSIMPLEC`).
 
 ## Outputs
@@ -68,43 +131,75 @@ Results (fields, histories, VTK) land in `ExportFiles/`.
 - Field dumps: `u*.txt`, `v*.txt`, `p*.txt`, VTK files for visualization.
 - Final console summary of residuals and pressure drops (core and full domain).
 
-## Thermal Solver Improvements
-The thermal post-processor (`heat_solver.py`) has been significantly optimized:
-- **Vectorized Assembly:** Matrix construction uses NumPy vectorization, reducing assembly time from minutes to seconds.
-- **Parallel Solver:** Uses `scipy.sparse.linalg.bicgstab` (Iterative BiCGSTAB) with OpenMP multi-threading (`OMP_NUM_THREADS`) to utilize all available CPU cores.
-- **Smart Visualization:** Exports separate `thermal_results_fluid.vtk` and `thermal_results_solid.vtk` files using **Unstructured Grids**. This eliminates "ghost cells" and allows for clean, isolated visualization of fluid and solid domains without manual masking.
-- **Steady-State Physics:** Solves the steady-state conjugate heat transfer equation (Solid Cp is ignored as it drops out of the steady-state formulation).
+## Thermal Solver (C++)
+The thermal post-processor (`ThermalSolver/thermal_solver.cpp`) performs 3D conjugate heat transfer:
+- **3D Structured Grid**: Non-uniform z-spacing (solid base + fluid/fin region)
+- **Density-Based**: Supports continuous gamma field with interpolated thermal conductivity
+- **Fast Solver**: AMGCL library with IDR(s) Krylov method and AMG preconditioning
+- **Output**: Unstructured VTK with temperature, velocity, region fields
 
 ## Notes
 - Steady laminar only; pseudo-transient stepping is for convergence aid, not real-time accuracy.
 - All fluid properties are set in `SIMPLE.h` (density/viscosity hardcoded).
-- Direct pressure solve uses Eigen SimplicialLDLT; symbolic pattern is reused across iterations for speed. SOR fallback remains available. 
+- Direct pressure solve uses Eigen SimplicialLDLT; symbolic pattern is reused across iterations for speed. SOR fallback remains available.
 
 ## Flowchart (pipeline)
 ```mermaid
 flowchart TD
-  A["GeometryGenerator.py<br/>set geometry/mesh<br/>fluid params<br/>write ExportFiles/"] --> B["Build: g++ SIMPLE.cpp + utilities<br/>includes + OpenMP + O3"]
-  B --> C["Run solver simple.exe"]
-  subgraph SIMPLE_LOOP [SIMPLE Loop]
-    C --> C1["Load params/geometry<br/>allocate fields/masks<br/>init logs"]
-    C1 --> C2["Iteration loop"]
-    subgraph ITERATION [Iteration]
-      C2 --> I1["Momentum U/V<br/>FOU or SOU<br/>Brinkman masks<br/>solve U,V"]
-      I1 --> I2["Pseudo-time / CFL ramp<br/>updateCflRamp<br/>log pseudo-dt stats"]
-      I2 --> I3["Pressure correction<br/>assemble Ap,bp<br/>Direct (LDLT) or SOR<br/>cache mapping/factor"]
-      I3 --> I4["Velocity correction<br/>apply dP<br/>BCs"]
-      I4 --> I5["Residuals & dP<br/>core/full planes"]
-      I5 --> I6["Logging/output<br/>residuals.txt<br/>dp_history.txt<br/>console row<br/>checkpoint optional"]
-      I6 --> I7["Convergence check<br/>residuals or dP window"]
+    subgraph GEOMETRY ["Geometry Generation (Python)"]
+        G1["GeometryGeneratorV1.py<br/>Straight Channels"]
+        G2["GeometryGeneratorV2.py<br/>Random Network Routing<br/>Binary (0/1)"]
+        G3["GeometryGeneratorV3.py<br/>Density-Based<br/>Continuous (0.0-1.0)"]
     end
-    I7 -->|not done| C2
-    I7 -->|done| C3["Finalize<br/>sample final planes<br/>print summary<br/>saveAll fields/VTK"]
-  end
-  C3 --> D["Outputs (ExportFiles/)<br/>residuals.txt<br/>pressure_drop_history.txt<br/>u/v/p txt, VTK, PNGs"]
-  D --> E["PlotResiduals.py<br/>plot residuals & dP<br/>save PNG<br/>interactive zoom if matplotlib"]
-  D --> F["Optional Thermal"]
-  subgraph THERMAL [Thermal Post]
-    F --> F1["main.py (Carlos Goni Gill)<br/>load thermal params/fields<br/>Multi-core config"]
-    F1 --> F2["heat_solver.py (Carlos Goni Gill)<br/>Vectorized/Parallel BiCGSTAB<br/>Unstructured VTK export"]
-  end
+
+    G1 --> EX["ExportFiles/<br/>fluid_params.txt<br/>geometry_fluid.txt<br/>thermal_params.txt"]
+    G2 --> EX
+    G3 --> EX
+
+    EX --> BUILD["Build C++ Solver<br/>g++ -std=c++17 -fopenmp<br/>SIMPLE.cpp + Utilities"]
+    BUILD --> RUN["Run: simple.exe"]
+
+    subgraph CFD ["CFD Solver (C++)"]
+        RUN --> INIT["Load Parameters<br/>Load Geometry<br/>Build Masks<br/>Compute α_max"]
+        INIT --> LOOP["Iteration Loop"]
+        
+        subgraph ITER ["Single SIMPLE Iteration"]
+            LOOP --> MOM["U/V Momentum<br/>iterations.cpp<br/>• FOU or SOU convection<br/>• Brinkman penalization<br/>• Pseudo-transient term"]
+            MOM --> PCOR["Pressure Correction<br/>pressure_solver.cpp<br/>• Direct LDLT or SOR<br/>• Pattern caching"]
+            PCOR --> VCOR["Velocity Correction<br/>u = u* + d·∇p'"]
+            VCOR --> BC["Boundary Conditions<br/>boundaries.cpp"]
+            BC --> RES["Compute Residuals<br/>Sample Pressure Planes<br/>postprocessing.cpp"]
+            RES --> LOG["Log Output<br/>output.cpp<br/>• Console row<br/>• residuals.txt<br/>• dp_history.txt"]
+            LOG --> CFL["Update CFL Ramp<br/>time_control.cpp"]
+            CFL --> CONV{"Converged?"}
+        end
+
+        CONV -->|No| LOOP
+        CONV -->|Yes| FIN["Finalize<br/>Save All Fields<br/>Export VTK"]
+    end
+
+    FIN --> OUT["ExportFiles/<br/>u.txt, v.txt, p.txt<br/>u_thermal.txt, v_thermal.txt<br/>fluid_results.vtk"]
+
+    OUT --> PLOT["PlotResiduals.py<br/>Residual & dP plots<br/>Interactive zoom"]
+
+    OUT --> THERM["Thermal Solver (Optional)"]
+
+    subgraph THERMAL ["3D Thermal (C++)"]
+        THERM --> TH1["thermal_solver.cpp<br/>Load thermal params<br/>Load u/v fields"]
+        TH1 --> TH2["3D FVM Assembly<br/>Advection + Diffusion<br/>Density interpolation"]
+        TH2 --> TH3["AMGCL Solve<br/>IDR(s) + AMG<br/>Multi-core"]
+        TH3 --> TH4["thermal_results_3d.vtk<br/>Temperature field<br/>Energy balance"]
+    end
+
+    OUT --> AUX["Auxiliary Tools"]
+    subgraph TOOLS ["Post-Processing Tools"]
+        AUX --> STEP["StepExporter.py<br/>STEP file for CAD"]
+        AUX --> WIDTH["ChannelWidthMeasure.py<br/>Channel width VTK"]
+        AUX --> DERIV["derive_interface.py<br/>Interface conductance"]
+    end
+
+    style GEOMETRY fill:#e1f5fe
+    style CFD fill:#fff3e0
+    style THERMAL fill:#fce4ec
+    style TOOLS fill:#e8f5e9
 ```

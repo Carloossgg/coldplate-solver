@@ -19,7 +19,11 @@ SIMPLE::SIMPLE() {
     loadParameters("ExportFiles/fluid_params.txt");
     initializeMemory();
     loadTopology("ExportFiles/geometry_fluid.txt");
-    buildAlphaField();
+    
+    // Density-based topology optimization (always enabled)
+    loadDensityField();  // Converts cellType to gamma
+    buildAlphaFromDensity();  // Build Brinkman alpha from gamma field
+    
     buildFluidMasks();  // Precompute fluid/solid masks for speed
 
     // Initialize with zero velocity field
@@ -43,7 +47,7 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     if (in >> htFromFile) {
         Ht_channel = htFromFile;
     }
-    // Ignore any extra columns (e.g., rho/nu) to enforce SIMPLE.h fluid properties
+    // Ignore any extra columns (e.g., rho/nu, old buffer/convexity params) to enforce SIMPLE.h fluid properties
     double ignoredRho = 0.0, ignoredNu = 0.0;
     if (in >> ignoredRho >> ignoredNu) {
         std::cout << "Ignoring fluid properties in " << fileName
@@ -56,6 +60,11 @@ void SIMPLE::loadParameters(const std::string& fileName) {
             Ht_channel = hy;
         }
     }
+    
+    // Compute Brinkman alpha_max from Darcy number: alpha = mu / (Da * L_c^2)
+    // L_c = characteristic length (domain width)
+    double L_c = N * hx;
+    brinkmanAlphaMax = eta / (brinkmanDarcyNumber * L_c * L_c);
 
     double domainLength = N * hx;
     double velRef = std::max(targetVel, 1e-6);
@@ -89,6 +98,8 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     } else {
         std::cout << "2.5D mode: OFF" << std::endl;
     }
+    std::cout << "Density-based TO: ON (Da=" << std::scientific << brinkmanDarcyNumber 
+              << ", alpha_max=" << brinkmanAlphaMax << ")" << std::defaultfloat << std::endl;
     std::cout << "Pressure solver: " << (useDirectPressureSolver ? "Direct (SimplicialLDLT)" : "Iterative (SOR)") << std::endl;
     std::cout << "OpenMP Threads: " << numThreads << std::endl;
     std::cout << "Grid: " << M << " x " << N << " (" << M * N << " cells)" << std::endl;
@@ -136,8 +147,9 @@ void SIMPLE::initializeMemory() {
     dN    = Eigen::MatrixXd::Zero(M, N + 1);
     b     = Eigen::MatrixXd::Zero(M + 1, N + 1);
 
-    cellType = Eigen::MatrixXi::Ones(M, N);  // Default: all fluid
+    cellType = Eigen::MatrixXd::Zero(M, N);  // Default: all fluid (0=fluid)
     alpha    = Eigen::MatrixXd::Zero(M, N);
+    gamma    = Eigen::MatrixXd::Ones(M, N);  // Default: all fluid (gamma=1)
 
     if (reuseInitialFields) {
         auto loadMatrix = [&](const std::string& baseName, Eigen::MatrixXd& mat) {
@@ -438,34 +450,85 @@ void SIMPLE::loadTopology(const std::string& fileName) {
 
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-            int val;
+            double val;
             if (!(in >> val)) return;
-            cellType(i, j) = val;  // Keep original values: 0=fluid, 1=solid
+            cellType(i, j) = val;  // 0=fluid, 1=solid (supports both int and float input)
         }
     }
     
-    // Count fluid/solid cells
-    int fluidCells = 0, solidCells = 0;
+    // Count fluid/solid/buffer cells
+    int fluidCells = 0, solidCells = 0, bufferCells = 0;
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-            if (cellType(i, j) == 0) fluidCells++;
-            else solidCells++;
+            double v = cellType(i, j);
+            if (v < 0.01) fluidCells++;       // 0 = fluid
+            else if (v > 0.99) solidCells++;  // 1 = solid
+            else bufferCells++;               // intermediate = buffer
         }
     }
-    std::cout << "Geometry: " << fluidCells << " fluid, " << solidCells << " solid cells" << std::endl;
+    std::cout << "Geometry: " << fluidCells << " fluid, " << solidCells << " solid, " 
+              << bufferCells << " buffer cells" << std::endl;
 }
 
-void SIMPLE::buildAlphaField() {
-    // Brinkman penalization: high alpha in solid regions creates drag
-    const double alphaFluid = 0.0;
-    const double alphaSolid = 0.0;  // Solid cells handled by masking (no Brinkman penalization)
-
+// ------------------------------------------------------------------
+// Load Density Field from geometry (density method always enabled)
+// ------------------------------------------------------------------
+void SIMPLE::loadDensityField() {
+    // geometry_fluid.txt contains either:
+    // - Binary: 0 (fluid) or 1 (solid)
+    // - Continuous: values between 0.0 (solid) and 1.0 (fluid)
+    // We convert to gamma convention: gamma=1 (fluid), gamma=0 (solid)
+    
+    // cellType is already loaded from geometry_fluid.txt by loadTopology()
+    // Just convert cellType values to gamma
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-            // 0 = fluid (low alpha), non-zero = solid (high alpha)
-            alpha(i, j) = (cellType(i, j) == 0) ? alphaFluid : alphaSolid;
+            double val = cellType(i, j);
+            // If binary (0 or 1): invert to gamma convention
+            // If continuous (0.0-1.0): invert to gamma convention
+            gamma(i, j) = 1.0 - val;  // cellType 0 (fluid) -> gamma 1.0, cellType 1 (solid) -> gamma 0.0
         }
     }
+    
+    // Count density statistics
+    int pureFluid = 0, pureSolid = 0, buffer = 0;
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            if (gamma(i, j) > 0.99) pureFluid++;
+            else if (gamma(i, j) < 0.01) pureSolid++;
+            else buffer++;
+        }
+    }
+    std::cout << "Geometry: " << pureFluid << " fluid, " << pureSolid 
+              << " solid, " << buffer << " buffer cells" << std::endl;
+}
+
+// ------------------------------------------------------------------
+// Build Alpha Field from Density (Brinkman penalization)
+// ------------------------------------------------------------------
+void SIMPLE::buildAlphaFromDensity() {
+    // Simple linear interpolation: alpha = alpha_max * (1 - gamma)
+    // gamma=1 (fluid): alpha=0 (no drag)
+    // gamma=0 (solid): alpha=alpha_max (full drag)
+    // Intermediate values come directly from geometry generator
+    
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            double g = gamma(i, j);
+            alpha(i, j) = brinkmanAlphaMax * (1.0 - g);
+        }
+    }
+    
+    // Ensure top/bottom walls remain solid
+    for (int j = 0; j < N; ++j) {
+        alpha(0, j) = brinkmanAlphaMax;
+        alpha(M - 1, j) = brinkmanAlphaMax;
+        gamma(0, j) = 0.0;
+        gamma(M - 1, j) = 0.0;
+    }
+    
+    std::cout << "Brinkman alpha field built from density (alpha_max=" 
+              << std::scientific << brinkmanAlphaMax << ")" << std::defaultfloat << std::endl;
 }
 
 // ------------------------------------------------------------------
