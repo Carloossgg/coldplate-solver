@@ -5,4 +5,10 @@ __pycache__/
 derive_interface.py
 main.py
 
+# File types to ignore (User requested)
+*.png
+*.txt
+*.vtk
+*.step
+
 # (Exports handled by internal .gitignore)
