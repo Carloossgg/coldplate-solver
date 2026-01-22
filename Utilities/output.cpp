@@ -77,13 +77,17 @@ void SIMPLE::saveAll()
     saveMatrix(p, "p");
 
     // 1. Interpolate velocities to cell centers (Required for VTK & Thermal)
+    // Zero out velocity in solid cells (cellType == 1) for correct visualization
     Eigen::MatrixXd uCenter = Eigen::MatrixXd::Zero(M, N);
     Eigen::MatrixXd vCenter = Eigen::MatrixXd::Zero(M, N);
 
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-            uCenter(i, j) = 0.5 * (u(i, j) + u(i+1, j));
-            vCenter(i, j) = 0.5 * (v(i, j) + v(i, j+1));
+            if (cellType(i, j) < 0.99999) {  // Only interpolate for permeable cells
+                uCenter(i, j) = 0.5 * (u(i, j) + u(i+1, j));
+                vCenter(i, j) = 0.5 * (v(i, j) + v(i, j+1));
+            }
+            // Solid cells remain zero (initialized above)
         }
     }
 
