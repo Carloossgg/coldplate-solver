@@ -136,8 +136,8 @@
      double Lx = 0, Ly = 0, H_b = 0.0005, H_t = 0.004;
     double k_s = 400.0, k_f = 0.6, rho = 998.0, Cp = 4180.0, T_inlet = 30.0;
     double rtol = 1e-6; int maxiter = 1000;
-    // Conductivity interpolation: 0=linear, 1=RAMP (for TO)
-    int k_interp_mode = 0;  // 0=linear (stable), 1=RAMP (paper Eq.13 for TO)
+    // Conductivity interpolation: 0=linear, 1=RAMP (for TO), 2=harmonic (consistent energy)
+    int k_interp_mode = 0;  // 0=linear (default), 1=RAMP, 2=harmonic
     double qk = 1.0;  // RAMP penalization parameter (paper uses [1,3,10,30] sequence)
     
     double dx() const { return Lx / Nx; }
@@ -187,6 +187,7 @@
      // Thermal conductivity with configurable interpolation
    // Mode 0 (Linear): k = k_s * (1-gamma) + k_f * gamma
    // Mode 1 (RAMP): k = k_f + (k_s - k_f) * (1-gamma) / (1 + qk*gamma)  [Paper Eq. 13]
+   // Mode 2 (Harmonic): k = k_s*k_f / ((1-gamma)*k_f + gamma*k_s) - consistent with velocity penalization
    double kval(int i, int j, int k) const { 
        if (k < p.nz_solid) return p.k_s;  // Base plate always solid conductivity
        double g = gamma[j*p.Nx+i];
@@ -195,8 +196,13 @@
            // RAMP interpolation (Zeng & Lee paper, Eq. 13)
            // For optimization: penalizes intermediate gamma toward extremes
            return p.k_f + (p.k_s - p.k_f) * (1.0 - g) / (1.0 + p.qk * g);
+       } else if (p.k_interp_mode == 2) {
+           // Harmonic mean interpolation - physically correct for layers in series
+           // Consistent with velocity penalization for energy balance
+           // At gamma=0.5: k = 1.2 W/m-K (vs 200 W/m-K linear)
+           return p.k_s * p.k_f / ((1.0 - g) * p.k_f + g * p.k_s + 1e-30);
        } else {
-           // Linear interpolation (default, current best for buffer zones)
+           // Linear interpolation (default)
            return p.k_s * (1.0 - g) + p.k_f * g;
        }
    }
@@ -232,8 +238,12 @@
                     for (int i = 0; i < Nx; i++) {
                         int P = idx(i, j, k);
                         double diag = 0, kP = kval(i,j,k), po = pois(k);
-                        double uP = (region(i,j,k) == 1) ? u_xy[j*Nx+i]*po : 0;
-                        double vP = (region(i,j,k) == 1) ? v_xy[j*Nx+i]*po : 0;
+                        
+                        // No additional velocity penalization - CFD solver already applies Brinkman
+                        // The u_xy, v_xy fields are already penalized by the CFD Brinkman term
+                        double g = (k < p.nz_solid) ? 0.0 : gamma[j*Nx+i];
+                        double uP = (g > 0.01) ? u_xy[j*Nx+i] * po : 0.0;
+                        double vP = (g > 0.01) ? v_xy[j*Nx+i] * po : 0.0;
                         
                         // ========== X FACES (Upwind) ==========
                         if (i > 0) {
