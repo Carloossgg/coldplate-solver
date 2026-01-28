@@ -115,11 +115,19 @@ public:
     // SIMPLE  (Semi-Implicit Method for Pressure-Linked Equations):
     //   - Original Patankar-Spalding algorithm
     //   - Uses under-relaxation for stability
+<<<<<<< HEAD
     //   - d = A / a_P  where a_P already includes neighbor coefficients
     //
     // SIMPLEC (SIMPLE-Consistent):
     //   - Improved variant by Van Doormaal & Raithby
     //   - Uses d = A / (a_P - Σa_nb)  [more consistent pressure-velocity coupling]
+=======
+    //   - d = Δx / (aP + Σa_nb)  [neglects neighbor velocity corrections]
+    //
+    // SIMPLEC (SIMPLE-Consistent):
+    //   - Improved variant by Van Doormaal & Raithby
+    //   - Uses d = Δx / (aP - Σa_nb)  [more consistent with momentum equation]
+>>>>>>> 1520e29608ee29403d495e0c3545ddf804f6d557
     //   - Often allows larger relaxation factors → faster convergence
     
     bool useSIMPLEC = false;  // true = SIMPLEC, false = standard SIMPLE
