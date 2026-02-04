@@ -22,7 +22,7 @@
 //
 //   3. TOTAL pressure drop: ΔP_total = (P_static + P_dynamic)_in - (...)_out
 //      Accounts for both static pressure loss and velocity changes
-//      Uses MASS-WEIGHTED averaging for accurate total pressure
+//      Uses MASS-FLOW-WEIGHTED total pressure (STAR pressure-drop style)
 //
 // INTERPOLATION:
 //   For a given physical x-coordinate, we:
@@ -30,9 +30,9 @@
 //   2. Compute interpolation factor t = (x - x_left) / (x_right - x_left)
 //   3. Interpolate: value = (1-t)*value_left + t*value_right
 //
-// SOLID HANDLING:
-//   If either adjacent cell is solid (cellType > 0.5), that row is skipped.
-//   This ensures we only sample in fully fluid regions for accuracy.
+// FLUID-ONLY HANDLING:
+//   A row is sampled only if both adjacent cells are pure fluid (gamma ~= 1).
+//   Any solid/intermediate-density cell is excluded from plane averaging.
 //
 // ============================================================================
 
@@ -47,8 +47,11 @@
 // ============================================================================
 // Helper: Convert cell column index to physical x-coordinate (cell center)
 // ============================================================================
-static double cellCenterX(int col, double hx) {
-    return (col + 0.5) * hx;
+// ============================================================================
+// Helper: Convert cell column index to physical x-coordinate (cell center)
+// ============================================================================
+static float cellCenterX(int col, float hx) {
+    return (col + 0.5f) * hx;
 }
 
 // ============================================================================
@@ -56,58 +59,58 @@ static double cellCenterX(int col, double hx) {
 // Returns (colLeft, colRight, t) where t is the interpolation factor [0,1]
 // x = (1-t)*x_left + t*x_right
 // ============================================================================
-static void findBracketingColumns(double xPhysical, double hx, int N,
-                                   int& colLeft, int& colRight, double& t) {
+static void findBracketingColumns(float xPhysical, float hx, int N,
+                                   int& colLeft, int& colRight, float& t) {
     // Physical x of first cell center is 0.5*hx, last is (N-0.5)*hx
-    double xMin = 0.5 * hx;
-    double xMax = (N - 0.5) * hx;
+    float xMin = 0.5f * hx;
+    float xMax = (N - 0.5f) * hx;
     
     // Clamp to domain
-    double xClamped = std::max(xMin, std::min(xPhysical, xMax));
+    float xClamped = std::max(xMin, std::min(xPhysical, xMax));
     
     // Find which cell center interval we're in
     // Cell j has center at (j + 0.5) * hx
     // So xClamped is between cell centers at j and j+1 when:
     //   (j + 0.5)*hx <= xClamped < (j + 1.5)*hx
     // => j = floor(xClamped/hx - 0.5)
-    double jFloat = xClamped / hx - 0.5;
+    float jFloat = xClamped / hx - 0.5f;
     colLeft = static_cast<int>(std::floor(jFloat));
     colLeft = std::max(0, std::min(colLeft, N - 2));  // Ensure valid range for interpolation
     colRight = colLeft + 1;
     
     // Interpolation factor
-    double xLeft = cellCenterX(colLeft, hx);
-    double xRight = cellCenterX(colRight, hx);
-    if (std::abs(xRight - xLeft) < 1e-12) {
-        t = 0.0;
+    float xLeft = cellCenterX(colLeft, hx);
+    float xRight = cellCenterX(colRight, hx);
+    if (std::abs(xRight - xLeft) < 1e-12f) {
+        t = 0.0f;
     } else {
         t = (xClamped - xLeft) / (xRight - xLeft);
     }
-    t = std::max(0.0, std::min(1.0, t));  // Clamp t to [0,1]
+    t = std::max(0.0f, std::min(1.0f, t));  // Clamp t to [0,1]
 }
 
 // ============================================================================
 // samplePlaneAtX: Sample pressure and velocity at a given physical x-coordinate
 // Uses linear interpolation between adjacent cell columns
-// Skips rows where either adjacent cell is solid
+// Skips rows unless both adjacent cells are pure fluid (gamma ~= 1)
 // ============================================================================
-PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
+PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical) {
     PlaneMetrics metrics;
     
     const int M = solver.M;
     const int N = solver.N;
-    const double hx = solver.hx;
-    const double hy = solver.hy;
-    const double rho = solver.rho;
+    const float hx = solver.hx;
+    const float hy = solver.hy;
+    const float rho = solver.rho;
     
     // Validate inputs
-    if (M <= 0 || N <= 0 || hx <= 0.0 || hy <= 0.0) {
+    if (M <= 0 || N <= 0 || hx <= 0.0f || hy <= 0.0f) {
         return metrics;
     }
     
     // Domain bounds
-    double domainXMin = 0.0;
-    double domainXMax = N * hx;
+    float domainXMin = 0.0f;
+    float domainXMax = N * hx;
     
     // Check if xPhysical is outside domain and warn
     if (xPhysical < domainXMin || xPhysical > domainXMax) {
@@ -117,15 +120,15 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
     
     // Find bracketing columns for interpolation
     int colLeft, colRight;
-    double t;
+    float t;
     findBracketingColumns(xPhysical, hx, N, colLeft, colRight, t);
     
     // Accumulators
-    double staticAreaSum = 0.0;
-    double dynAreaSum = 0.0;
-    double totalWeighted = 0.0;
-    double area = 0.0;
-    double fluxSum = 0.0;
+    float staticAreaSum = 0.0f;
+    float dynAreaSum = 0.0f;
+    float totalWeighted = 0.0f;
+    float area = 0.0f;
+    float fluxSum = 0.0f;
     
     // Iterate over rows (interior pressure rows: 1 to M-1)
     // Pressure grid is (M+1) x (N+1), cellType is M x N
@@ -137,13 +140,15 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
         if (cellRow < 0 || cellRow >= M) continue;
         if (colLeft < 0 || colLeft >= N || colRight < 0 || colRight >= N) continue;
         
-        // Skip if EITHER adjacent cell is solid (conservative approach)
-        // Use threshold: cellType > 0.5 means solid
-        if (solver.cellType(cellRow, colLeft) > 0.5 || solver.cellType(cellRow, colRight) > 0.5) {
+        // Include only pure-fluid rows for reporting:
+        // both adjacent cells must have gamma ~= 1 (not solid/intermediate).
+        constexpr float pureFluidTol = 1e-6f;
+        if (solver.gamma(cellRow, colLeft) < 1.0f - pureFluidTol ||
+            solver.gamma(cellRow, colRight) < 1.0f - pureFluidTol) {
             continue;
         }
         
-        const double faceArea = hy;
+        const float faceArea = hy;
         area += faceArea;
         
         // Interpolate pressure: p is at (i, j+1) for cellType column j
@@ -155,9 +160,9 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
         pColLeft = std::max(0, std::min(pColLeft, static_cast<int>(solver.p.cols()) - 1));
         pColRight = std::max(0, std::min(pColRight, static_cast<int>(solver.p.cols()) - 1));
         
-        double pLeft = solver.p(i, pColLeft);
-        double pRight = solver.p(i, pColRight);
-        double staticP = (1.0 - t) * pLeft + t * pRight;
+        float pLeft = solver.p(i, pColLeft);
+        float pRight = solver.p(i, pColRight);
+        float staticP = (1.0f - t) * pLeft + t * pRight;
         
         // Interpolate u-velocity
         // u is at cell faces: u(i, j) is the velocity at the left face of cell (i-1, j)
@@ -166,9 +171,9 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
         int uColLeft = std::max(0, std::min(colLeft, static_cast<int>(solver.u.cols()) - 1));
         int uColRight = std::max(0, std::min(colRight, static_cast<int>(solver.u.cols()) - 1));
         
-        double uLeft = solver.u(i, uColLeft);
-        double uRight = solver.u(i, uColRight);
-        double uNormal = (1.0 - t) * uLeft + t * uRight;
+        float uLeft = solver.u(i, uColLeft);
+        float uRight = solver.u(i, uColRight);
+        float uNormal = (1.0f - t) * uLeft + t * uRight;
         
         // Interpolate v-velocity (tangential)
         // v is at horizontal faces: v(i, j) is the velocity at the bottom face of cell (i, j-1)
@@ -181,42 +186,44 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
         int vRowBottom = std::max(0, std::min(i, static_cast<int>(solver.v.rows()) - 1));
         
         // Average v at top and bottom of the cell, then interpolate in x
-        double vTopLeft = solver.v(vRowTop, vColLeft);
-        double vTopRight = solver.v(vRowTop, vColRight);
-        double vBottomLeft = solver.v(vRowBottom, vColLeft);
-        double vBottomRight = solver.v(vRowBottom, vColRight);
+        float vTopLeft = solver.v(vRowTop, vColLeft);
+        float vTopRight = solver.v(vRowTop, vColRight);
+        float vBottomLeft = solver.v(vRowBottom, vColLeft);
+        float vBottomRight = solver.v(vRowBottom, vColRight);
         
-        double vTop = (1.0 - t) * vTopLeft + t * vTopRight;
-        double vBottom = (1.0 - t) * vBottomLeft + t * vBottomRight;
-        double vTangential = 0.5 * (vTop + vBottom);
+        float vTop = (1.0f - t) * vTopLeft + t * vTopRight;
+        float vBottom = (1.0f - t) * vBottomLeft + t * vBottomRight;
+        float vTangential = 0.5f * (vTop + vBottom);
         
         // Compute dynamic pressure
-        double velMag = std::sqrt(uNormal * uNormal + vTangential * vTangential);
-        double dynP = 0.5 * rho * velMag * velMag;
+        float velMag = std::sqrt(uNormal * uNormal + vTangential * vTangential);
+        float dynP = 0.5f * rho * velMag * velMag;
+        float totalPAbs = staticP + dynP;  // In this solver, p is gauge; absolute offset cancels in dP.
         
         staticAreaSum += staticP * faceArea;
         dynAreaSum += dynP * faceArea;
         
-        // Mass-weighted total pressure (only for positive flux = flow in expected direction)
-        double flux = rho * uNormal * faceArea;
-        if (flux > 0.0) {
-            fluxSum += flux;
-            totalWeighted += (staticP + dynP) * flux;
+        // STAR-style mass-flow weighting: weight by |m_dot| at each face
+        float flux = rho * uNormal * faceArea;
+        float fluxAbs = std::abs(flux);
+        if (fluxAbs > 0.0f) {
+            fluxSum += fluxAbs;
+            totalWeighted += totalPAbs * fluxAbs;
         }
     }
     
     // Compute averages
     metrics.flowArea = area;
     metrics.massFlux = fluxSum;
-    if (area > 0.0) {
+    if (area > 0.0f) {
         metrics.avgStatic = staticAreaSum / area;
         metrics.avgDynamic = dynAreaSum / area;
         metrics.valid = true;
     }
-    if (fluxSum > 0.0) {
+    if (fluxSum > 0.0f) {
         metrics.avgTotal = totalWeighted / fluxSum;
-    } else {
-        // Fallback if no positive flux
+    } else if (area > 0.0f) {
+        // No through-flow available: fall back to area-averaged total.
         metrics.avgTotal = metrics.avgStatic + metrics.avgDynamic;
     }
     
@@ -226,9 +233,9 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical) {
 // ============================================================================
 // printPlaneInfo: Debug helper to print plane sampling information
 // ============================================================================
-void printPlaneInfo(const char* name, double xPhysical, const PlaneMetrics& m) {
+void printPlaneInfo(const char* name, float xPhysical, const PlaneMetrics& m) {
     std::cout << "  " << name << " (x=" << std::fixed << std::setprecision(4) 
-              << xPhysical * 1000.0 << " mm):" << std::endl;
+              << xPhysical * 1000.0f << " mm):" << std::endl;
     std::cout << "    Flow area:     " << m.flowArea << " m^2/depth" << std::endl;
     std::cout << "    Static P:      " << std::setprecision(1) << m.avgStatic << " Pa" << std::endl;
     std::cout << "    Dynamic P:     " << m.avgDynamic << " Pa" << std::endl;

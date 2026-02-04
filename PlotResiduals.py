@@ -37,6 +37,7 @@ def plot_residuals():
     mass_res = []
     u_res = []
     v_res = []
+    cfl_values = []
     dp_core_iters = []
     dp_core_values = []
     dp_full_iters = []
@@ -52,19 +53,23 @@ def plot_residuals():
                 if not parts: 
                     continue
                 
-                # Parse columns: Iter Mass U V PressureDrop
+                # Parse columns: Iter Mass U V PressureDrop_Core PressureDrop_Full [CFL]
                 iters.append(int(parts[0]))
                 mass_res.append(float(parts[1]))
                 u_res.append(float(parts[2]))
                 v_res.append(float(parts[3]))
+                
+                # Default dP if columns 4 and 5 exist
                 if len(parts) > 4:
-                    iter_val = int(parts[0])
-                    dp_core_iters.append(iter_val)
+                    dp_core_iters.append(int(parts[0]))
                     dp_core_values.append(float(parts[4]))
                 if len(parts) > 5:
-                    iter_val = int(parts[0])
-                    dp_full_iters.append(iter_val)
+                    dp_full_iters.append(int(parts[0]))
                     dp_full_values.append(float(parts[5]))
+                
+                # Handle CFL if exists (new column 6)
+                if len(parts) > 6:
+                    cfl_values.append(float(parts[6]))
         
         # If a dedicated pressure-drop file exists, prefer it for plotting
         if os.path.exists(dp_file):
@@ -87,19 +92,34 @@ def plot_residuals():
                         dp_full_iters.append(iter_val)
                         dp_full_values.append(float(parts[2]))
         
-        # --- PLOT 1: RESIDUALS ---
-        resid_fig = plt.figure(figsize=(10, 6))
-        plt.semilogy(iters, mass_res, label='Mass (Continuity)', linewidth=1.5, color='black')
-        plt.semilogy(iters, u_res, label='U-Momentum', linewidth=1.5, linestyle='--', color='blue')
-        plt.semilogy(iters, v_res, label='V-Momentum', linewidth=1.5, linestyle='--', color='red')
-        plt.title('CFD Solver Convergence History')
-        plt.xlabel('Iteration')
-        plt.ylabel('Residual (Log Scale)')
-        plt.grid(True, which="both", linestyle='-', alpha=0.3)
-        plt.legend()
+        # --- PLOT 1: RESIDUALS & CFL ---
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        # Left axis: Residuals (Log Scale)
+        ax1.semilogy(iters, mass_res, label='Mass (Continuity)', linewidth=1.5, color='black')
+        ax1.semilogy(iters, u_res, label='U-Momentum', linewidth=1.5, linestyle='--', color='blue')
+        ax1.semilogy(iters, v_res, label='V-Momentum', linewidth=1.5, linestyle='--', color='red')
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Residual (Log Scale)')
+        ax1.grid(True, which="both", linestyle='-', alpha=0.3)
+        
+        # Right axis: CFL (Linear Scale)
+        if cfl_values:
+            ax2 = ax1.twinx()
+            ax2.plot(iters, cfl_values, label='Pseudo-CFL', color='magenta', linewidth=1.5, alpha=0.6)
+            ax2.set_ylabel('Pseudo-CFL', color='magenta')
+            ax2.tick_params(axis='y', labelcolor='magenta')
+            # Combine legends
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+        else:
+            ax1.legend(loc='upper right')
+
+        plt.title('CFD Solver Convergence & CFL History')
         plt.tight_layout()
         plt.savefig(output_image, dpi=600)
-        print(f"Residual plot saved to {output_image}")
+        print(f"Convergence plot saved to {output_image}")
         
         # --- PLOT 2: PRESSURE DROP ---
         if dp_core_iters or dp_full_iters:

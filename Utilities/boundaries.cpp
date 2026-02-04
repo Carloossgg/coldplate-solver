@@ -45,48 +45,52 @@
 // Called after momentum solve (on uStar, vStar) and after velocity correction
 // (on u, v) to ensure boundary values are enforced.
 // ============================================================================
-void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXd& uIn,
-                                           Eigen::MatrixXd& vIn)
+void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXf& uIn,
+                                           Eigen::MatrixXf& vIn)
 {
     // Use the ramped inlet velocity set in runIterations()
-    const double Uin = inletVelocity;
+    const float Uin = inletVelocity;
 
     // ---------------------------
     // Bottom wall (y = 0): no-slip
     // ---------------------------
     for (int j = 0; j < N; ++j) {
-        uIn(0, j) = 0.0;        // u on bottom faces
+        uIn(0, j) = 0.0f;        // u on bottom faces
     }
     for (int j = 0; j < N + 1; ++j) {
-        vIn(0, j) = 0.0;        // v on bottom faces
+        vIn(0, j) = 0.0f;        // v on bottom faces
     }
 
     // ---------------------------
     // Top wall (y = H): no-slip
     // ---------------------------
     for (int j = 0; j < N; ++j) {
-        uIn(M, j) = 0.0;        // u on top faces
+        uIn(M, j) = 0.0f;        // u on top faces
     }
     for (int j = 0; j < N + 1; ++j) {
-        vIn(M - 1, j) = 0.0;    // v on top faces
+        vIn(M - 1, j) = 0.0f;    // v on top faces
     }
 
-    // Left boundary (x = 0): set inlet velocity only on fluid cells
+    // Left boundary (x = 0): set inlet velocity only on fluid-design cells
+    // Use gamma (design field) rather than cellType so Brinkman wall forcing
+    // and TO densities are handled consistently with momentum equations.
     for (int i = 1; i < M; ++i) {
-        const int cellRow = i - 1;  // Corresponding row in cellType
-        if (cellRow >= 0 && cellRow < static_cast<int>(cellType.rows()) && cellType(cellRow, 0) < 0.5) {
-            // Fluid part of inlet: impose uniform velocity
+        const int cellRow = i - 1;  // Corresponding row in gamma/alpha
+        if (cellRow >= 0 &&
+            cellRow < static_cast<int>(gamma.rows()) &&
+            gamma(cellRow, 0) > 0.5f) {
+            // Fluid part of inlet: impose uniform velocity.
             uIn(i, 0) = Uin;
         } else {
-            // Solid part of inlet or out of bounds: no-slip
-            uIn(i, 0) = 0.0;
+            // Solid/penalized part of inlet or out of bounds: no-slip.
+            uIn(i, 0) = 0.0f;
         }
     }
 
     // v on left boundary: no normal flow (x-normal boundary, so v is tangential).
     // We simply set v = 0 everywhere on the inlet column for stability.
     for (int i = 0; i < M; ++i) {
-        vIn(i, 0) = 0.0;
+        vIn(i, 0) = 0.0f;
     }
 
     // ---------------------------
@@ -104,7 +108,7 @@ void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXd& uIn,
 // ----------------------------------------------------------
 // Pressure boundary conditions
 // ----------------------------------------------------------
-void SIMPLE::setPressureBoundaryConditions(Eigen::MatrixXd& pIn)
+void SIMPLE::setPressureBoundaryConditions(Eigen::MatrixXf& pIn)
 {
     // p is (M+1 x N+1). Indices: i=0..M, j=0..N.
     //
@@ -129,21 +133,5 @@ void SIMPLE::setPressureBoundaryConditions(Eigen::MatrixXd& pIn)
     }
 }
 
-// ----------------------------------------------------------
-// Geometry: 1 = solid, 0 = fluid (from cellType)
-// ----------------------------------------------------------
-double SIMPLE::checkBoundaries(int i, int j)
-{
-    // 1. Outer box (domain limits) are the only true "hard" boundaries
-    // this function cares about now. Internal obstacles are handled
-    // via alpha in the momentum equation, not via checkBoundaries.
-    if (i <= 0) return 1;     // Top wall
-    if (i >= M) return 1;     // Bottom wall
-    if (j <= 0) return 1;     // Inlet (x = 0 plane)
-    if (j >= N) return 1;     // Outlet (x = L plane)
-
-    // 2. Internal obstacles are not treated as boundaries here.
-    //    This keeps the SIMPLE algebra cleaner, and solids
-    //    are handled through the drag/Brinkman term via alpha.
-    return 0;
-}
+// checkBoundaries is now inline in SIMPLE.h for performance
+// (called ~4M times per iteration)

@@ -15,13 +15,21 @@ Laminar, incompressible SIMPLE solver on a structured Cartesian grid (finite vol
 | File | Description |
 |------|-------------|
 | `Utilities/iterations.cpp` | Single SIMPLE iteration: momentum solve, pressure correction, velocity correction |
-| `Utilities/pressure_solver.cpp` | Pressure Poisson equation solve (Direct LDLT or iterative SOR) |
+| `Utilities/pressure_solver.cpp` | Pressure Poisson equation solver interface (calls CPU/GPU backends) |
+| `Utilities/momentum_solver.cpp` | Momentum equation solver interface (Unified U/V templated solver) |
 | `Utilities/convection.cpp` | Second-order upwind (SOU) deferred corrections for convection |
 | `Utilities/boundaries.cpp` | Inlet/outlet/wall boundary conditions for velocity and pressure |
 | `Utilities/masks.cpp` | Precomputed fluid/solid masks for staggered U/V/P grids |
 | `Utilities/time_control.cpp` | Pseudo-CFL ramping and time-step statistics logging |
 | `Utilities/output.cpp` | File I/O: residuals, pressure history, VTK export, thermal cropping |
 | `Utilities/postprocessing.cpp` | Physical location-based pressure/velocity sampling |
+
+### modular Solvers (`Utilities/solvers/`)
+| Directory | Description |
+|-----------|-------------|
+| `linalg.h` | Common CSR structures and linear algebra primitives |
+| `cpu/` | **CPU Solvers:** `jacobi_solver.cpp` (Mom), `pcg_solver.cpp` (Pres), `amgcl_cpu_solver.h` |
+| `gpu/` | **GPU Solvers:** `pressure_solver.cu` (AMGCL-CUDA), `momentum_solver.cu` (Jacobi), `cuda_common.cuh` |
 
 ### Thermal Solver
 | File | Description |
@@ -45,12 +53,12 @@ Requires [Eigen](https://eigen.tuxfamily.org/) headers. **Eigen 3.4.0 is include
 
 **Windows (MinGW):**
 ```
-g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities\boundaries.cpp Utilities\iterations.cpp Utilities\output.cpp Utilities\postprocessing.cpp Utilities\pressure_solver.cpp Utilities\convection.cpp Utilities\time_control.cpp Utilities\masks.cpp -I. -I"Utilities\eigen-3.4.0" -O3 -o simple.exe
+g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities\boundaries.cpp Utilities\iterations.cpp Utilities\output.cpp Utilities\postprocessing.cpp Utilities\pressure_solver.cpp Utilities\momentum_solver.cpp Utilities\convection.cpp Utilities\time_control.cpp Utilities\masks.cpp Utilities\solvers\cpu\pcg_solver.cpp Utilities\solvers\cpu\jacobi_solver.cpp -I. -I"Utilities\eigen-3.4.0" -O3 -o simple.exe
 ```
 
 **Linux/macOS:**
 ```
-g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities/boundaries.cpp Utilities/iterations.cpp Utilities/output.cpp Utilities/postprocessing.cpp Utilities/pressure_solver.cpp Utilities/convection.cpp Utilities/time_control.cpp Utilities/masks.cpp -I. -I"Utilities/eigen-3.4.0" -O3 -o simple
+g++ -std=c++17 -fopenmp SIMPLE.cpp Utilities/boundaries.cpp Utilities/iterations.cpp Utilities/output.cpp Utilities/postprocessing.cpp Utilities/pressure_solver.cpp Utilities/momentum_solver.cpp Utilities/convection.cpp Utilities/time_control.cpp Utilities/masks.cpp Utilities/solvers/cpu/pcg_solver.cpp Utilities/solvers/cpu/jacobi_solver.cpp -I. -I"Utilities/eigen-3.4.0" -O3 -o simple
 ```
 
 ## How to run
@@ -77,7 +85,8 @@ Results (fields, histories, VTK) land in `ExportFiles/`.
 - Inspect outputs in `ExportFiles/` (VTK + text + PNGs)
 
 ## Tuning knobs (SIMPLE.h)
-- Pressure solver: `useDirectPressureSolver` (direct SimplicialLDLT) vs SOR fallback; `useSIMPLEC` toggles SIMPLEC variant.
+- Pressure solver: `pressureSolverType` (0=SOR, 1=Parallel CG, 2=AMGCL, 3=LDLT, 4=AMGCL-CUDA).
+- Momentum solver: `momentumSolverType` (0=Explicit, 1=Implicit Jacobi/SOR).
 - Relaxation: `uvAlpha`, `pAlpha`; SOR params: `maxPressureIter`, `sorOmega` (auto if 0), `pTol`.
 - Pseudo time/CFL ramp: `enablePseudoTimeStepping`, `enableCflRamp`, `pseudoCFLInitial/Max`, `cflRamp*`, `useLocalPseudoTime`.
 - Convection scheme: `convectionScheme = 0/1` (FOU/SOU).
@@ -102,12 +111,12 @@ Flow through "solid" regions is penalized via Brinkman friction:
 F(gamma) = -alpha_max * u * I_alpha(gamma)
 I_alpha(gamma) = (1 - gamma) / (1 + b_alpha * gamma)
 ```
-- `alpha_max = mu / (Da * L_c^2)` — maximum inverse permeability
+- `alpha_max = mu / K_min` — maximum inverse permeability (material-based)
 - `b_alpha` — convexity parameter (controls interpolation sharpness)
-- `Da` — Darcy number (lower = more solid-like)
+- `K_min` — solid-side permeability (lower = more solid-like)
 
 ### Parameters (SIMPLE.h)
-- `brinkmanDarcyNumber = 1e-5` — Darcy number (controls Brinkman penalization strength)
+- `brinkmanKMin = 1e-14` — solid-side permeability [m²] for Brinkman penalization
 
 ### Geometry Files
 - **GeometryGeneratorV1**: Simple straight parallel channels
@@ -124,7 +133,7 @@ Output files:
 - Main parameters live in `SIMPLE.h` (relaxation, CFL ramp, max iterations, convergence eps, ramp steps, etc.).
 - Geometry and mesh come from `GeometryGeneratorV*.py` (refinement, channel layout, buffers).
 - `GeometryGenerator*.py` also exports `Ht_channel` (out-of-plane height) for the optional 2.5D physics; no manual C++ edit is needed.
-- Pressure solver: toggle direct vs SOR in `SIMPLE.h` (`useDirectPressureSolver`), SIMPLE vs SIMPLEC (`useSIMPLEC`).
+- Pressure solver: toggle direct vs iterative in `SIMPLE.h` (`pressureSolverType`).
 
 ## Outputs
 - `ExportFiles/residuals.txt`, `pressure_drop_history.txt` (plus PNGs).

@@ -52,7 +52,7 @@ HeatFlux     = 100     # W/cm^2
 # Factor 1 = Base Resolution (e.g., 5 cells across channel)
 # Factor 4 = High Resolution (e.g., 20 cells across channel)
 
-REFINEMENT_FACTOR = 2  # <--- CHANGE THIS TO 1, 2, 4, 8
+REFINEMENT_FACTOR = 4  # <--- CHANGE THIS TO 1, 2, 4, 8
 
 # Base resolution: How many cells minimum to resolve 1.0 mm channel?
 BASE_CELLS_PER_CHANNEL = 5 

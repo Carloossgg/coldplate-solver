@@ -421,16 +421,15 @@ if NUM_BUFFER_LAYERS > 0:
     # Iteratively add buffer layers from solid boundary outward
     # Layer 1 (adjacent to solid): highest cellType value (closest to solid)
     # Layer N (furthest from solid): lowest cellType value (closest to fluid)
-    
+
     for layer in range(1, NUM_BUFFER_LAYERS + 1):
         # cellType value for this layer: linearly interpolate from 0.5 (layer 1) to near 0
-        # Layer 1: 0.5, Layer 2: 0.25, Layer 3: 0.125, etc. (or linear: 0.5, 0.33, 0.17...)
         # Using linear spacing: layer_value = 0.5 * (NUM_BUFFER_LAYERS - layer + 1) / NUM_BUFFER_LAYERS
         layer_value = 0.5 * (NUM_BUFFER_LAYERS - layer + 1) / NUM_BUFFER_LAYERS
-        
+
         # Create a copy to detect neighbors without feedback
         cellType_prev = cellType_final.copy()
-        
+
         for j in range(1, M_total - 1):
             for i in range(1, N_total - 1):
                 # If this is still a pure fluid cell (cellType = 0)
@@ -452,7 +451,7 @@ if NUM_BUFFER_LAYERS > 0:
                                 if abs(neighbor_val - prev_layer_value) < 0.01:
                                     has_target_neighbor = True
                                     break
-                    
+
                     if has_target_neighbor:
                         cellType_final[j, i] = layer_value
 

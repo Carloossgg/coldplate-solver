@@ -1,13 +1,40 @@
-# User specified exclusions
+# Build artifacts
+*.exe
+*.obj
+*.o
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# Python
 __pycache__/
 *.pyc
-derive_interface.py
-main.py
+*.pyo
 
-# File types to ignore (User requested)
-*.png
-*.txt
+# Output files
+ExportFiles/
 *.vtk
-*.step
 
-# (Exports handled by internal .gitignore)
+# IDE/Editor
+.vs/
+.vscode/
+*.swp
+*~
+
+# CUDA build files
+*.cubin
+*.fatbin
+*.ptx
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Large libraries (download separately)
+# Utilities/eigen-3.4.0/
+# ThermalSolver/amgcl/

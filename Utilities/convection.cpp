@@ -50,66 +50,66 @@
 // Returns:
 //   S_dc contribution to add to the momentum source term
 // ============================================================================
-double computeSOUCorrectionU(const SIMPLE& s, int i, int j,
-                             double Fe, double Fw, double Fn, double Fs) {
-    if (s.convectionScheme != 1) return 0.0;  // first-order upwind
+float computeSOUCorrectionU(const SIMPLE& s, int i, int j,
+                             float Fe, float Fw, float Fn, float Fs) {
+    if (s.convectionScheme != 1) return 0.0f;  // first-order upwind
     const int M = s.M;
     const int N = s.N;
     const auto& u = s.u;
-    double Sdc = 0.0;
+    float Sdc = 0.0f;
 
-    if (Fe >= 0.0) {
+    if (Fe >= 0.0f) {
         if (j >= 2) {
-            double u_sou_e = 1.5 * u(i, j) - 0.5 * u(i, j - 1);
-            double u_fou_e = u(i, j);
+            float u_sou_e = 1.5f * u(i, j) - 0.5f * u(i, j - 1);
+            float u_fou_e = u(i, j);
             Sdc -= Fe * (u_sou_e - u_fou_e);
         }
     } else {
         if (j + 2 < N) {
-            double u_sou_e = 1.5 * u(i, j + 1) - 0.5 * u(i, j + 2);
-            double u_fou_e = u(i, j + 1);
+            float u_sou_e = 1.5f * u(i, j + 1) - 0.5f * u(i, j + 2);
+            float u_fou_e = u(i, j + 1);
             Sdc -= Fe * (u_sou_e - u_fou_e);
         }
     }
 
-    if (Fw >= 0.0) {
+    if (Fw >= 0.0f) {
         if (j >= 2) {
-            double u_sou_w = 1.5 * u(i, j - 1) - 0.5 * u(i, j - 2);
-            double u_fou_w = u(i, j - 1);
+            float u_sou_w = 1.5f * u(i, j - 1) - 0.5f * u(i, j - 2);
+            float u_fou_w = u(i, j - 1);
             Sdc += Fw * (u_sou_w - u_fou_w);
         }
     } else {
         if (j + 1 < N) {
-            double u_sou_w = 1.5 * u(i, j) - 0.5 * u(i, j + 1);
-            double u_fou_w = u(i, j);
+            float u_sou_w = 1.5f * u(i, j) - 0.5f * u(i, j + 1);
+            float u_fou_w = u(i, j);
             Sdc += Fw * (u_sou_w - u_fou_w);
         }
     }
 
-    if (Fn >= 0.0) {
-        if (i >= 2) {
-            double u_sou_n = 1.5 * u(i - 1, j) - 0.5 * u(i - 2, j);
-            double u_fou_n = u(i - 1, j);
+    if (Fn >= 0.0f) {
+        if (i >= 1) {
+            float u_sou_n = 1.5f * u(i, j) - 0.5f * u(i - 1, j);
+            float u_fou_n = u(i, j);
             Sdc -= Fn * (u_sou_n - u_fou_n);
         }
     } else {
         if (i + 2 <= M) {
-            double u_sou_n = 1.5 * u(i, j) - 0.5 * u(i + 1, j);
-            double u_fou_n = u(i, j);
+            float u_sou_n = 1.5f * u(i + 1, j) - 0.5f * u(i + 2, j);
+            float u_fou_n = u(i + 1, j);
             Sdc -= Fn * (u_sou_n - u_fou_n);
         }
     }
 
-    if (Fs >= 0.0) {
-        if (i + 2 <= M) {
-            double u_sou_s = 1.5 * u(i + 1, j) - 0.5 * u(i + 2, j);
-            double u_fou_s = u(i + 1, j);
+    if (Fs >= 0.0f) {
+        if (i >= 2) {
+            float u_sou_s = 1.5f * u(i - 1, j) - 0.5f * u(i - 2, j);
+            float u_fou_s = u(i - 1, j);
             Sdc += Fs * (u_sou_s - u_fou_s);
         }
     } else {
-        if (i >= 2) {
-            double u_sou_s = 1.5 * u(i, j) - 0.5 * u(i - 1, j);
-            double u_fou_s = u(i, j);
+        if (i + 1 <= M) {
+            float u_sou_s = 1.5f * u(i, j) - 0.5f * u(i + 1, j);
+            float u_fou_s = u(i, j);
             Sdc += Fs * (u_sou_s - u_fou_s);
         }
     }
@@ -118,66 +118,66 @@ double computeSOUCorrectionU(const SIMPLE& s, int i, int j,
 }
 
 // Deferred correction term for V-momentum (second-order upwind)
-double computeSOUCorrectionV(const SIMPLE& s, int i, int j,
-                             double Fe, double Fw, double Fn, double Fs) {
-    if (s.convectionScheme != 1) return 0.0;  // first-order upwind
+float computeSOUCorrectionV(const SIMPLE& s, int i, int j,
+                             float Fe, float Fw, float Fn, float Fs) {
+    if (s.convectionScheme != 1) return 0.0f;  // first-order upwind
     const int M = s.M;
     const int N = s.N;
     const auto& v = s.v;
-    double Sdc = 0.0;
+    float Sdc = 0.0f;
 
-    if (Fe >= 0.0) {
+    if (Fe >= 0.0f) {
         if (j >= 2) {
-            double v_sou_e = 1.5 * v(i, j) - 0.5 * v(i, j - 1);
-            double v_fou_e = v(i, j);
+            float v_sou_e = 1.5f * v(i, j) - 0.5f * v(i, j - 1);
+            float v_fou_e = v(i, j);
             Sdc -= Fe * (v_sou_e - v_fou_e);
         }
     } else {
         if (j + 2 <= N) {
-            double v_sou_e = 1.5 * v(i, j + 1) - 0.5 * v(i, j + 2);
-            double v_fou_e = v(i, j + 1);
+            float v_sou_e = 1.5f * v(i, j + 1) - 0.5f * v(i, j + 2);
+            float v_fou_e = v(i, j + 1);
             Sdc -= Fe * (v_sou_e - v_fou_e);
         }
     }
 
-    if (Fw >= 0.0) {
+    if (Fw >= 0.0f) {
         if (j >= 2) {
-            double v_sou_w = 1.5 * v(i, j - 1) - 0.5 * v(i, j - 2);
-            double v_fou_w = v(i, j - 1);
+            float v_sou_w = 1.5f * v(i, j - 1) - 0.5f * v(i, j - 2);
+            float v_fou_w = v(i, j - 1);
             Sdc += Fw * (v_sou_w - v_fou_w);
         }
     } else {
         if (j + 1 <= N) {
-            double v_sou_w = 1.5 * v(i, j) - 0.5 * v(i, j + 1);
-            double v_fou_w = v(i, j);
+            float v_sou_w = 1.5f * v(i, j) - 0.5f * v(i, j + 1);
+            float v_fou_w = v(i, j);
             Sdc += Fw * (v_sou_w - v_fou_w);
         }
     }
 
-    if (Fn >= 0.0) {
+    if (Fn >= 0.0f) {
         if (i >= 1) {
-            double v_sou_n = 1.5 * v(i, j) - 0.5 * v(i - 1, j);
-            double v_fou_n = v(i, j);
+            float v_sou_n = 1.5f * v(i, j) - 0.5f * v(i - 1, j);
+            float v_fou_n = v(i, j);
             Sdc -= Fn * (v_sou_n - v_fou_n);
         }
     } else {
         if (i + 2 < M) {
-            double v_sou_n = 1.5 * v(i + 1, j) - 0.5 * v(i + 2, j);
-            double v_fou_n = v(i + 1, j);
+            float v_sou_n = 1.5f * v(i + 1, j) - 0.5f * v(i + 2, j);
+            float v_fou_n = v(i + 1, j);
             Sdc -= Fn * (v_sou_n - v_fou_n);
         }
     }
 
-    if (Fs >= 0.0) {
-        if (i + 2 < M) {
-            double v_sou_s = 1.5 * v(i + 1, j) - 0.5 * v(i + 2, j);
-            double v_fou_s = v(i + 1, j);
+    if (Fs >= 0.0f) {
+        if (i >= 2) {
+            float v_sou_s = 1.5f * v(i - 1, j) - 0.5f * v(i - 2, j);
+            float v_fou_s = v(i - 1, j);
             Sdc += Fs * (v_sou_s - v_fou_s);
         }
     } else {
-        if (i >= 1) {
-            double v_sou_s = 1.5 * v(i, j) - 0.5 * v(i - 1, j);
-            double v_fou_s = v(i, j);
+        if (i + 1 < M) {
+            float v_sou_s = 1.5f * v(i, j) - 0.5f * v(i + 1, j);
+            float v_fou_s = v(i, j);
             Sdc += Fs * (v_sou_s - v_fou_s);
         }
     }

@@ -131,24 +131,82 @@
      size_t nnz() const { return values.size(); }
  };
  
- struct Params {
-     int Nx = 0, Ny = 0, nz_solid = 2, nz_fluid = 7;
-     double Lx = 0, Ly = 0, H_b = 0.0005, H_t = 0.004;
-    double k_s = 400.0, k_f = 0.6, rho = 998.0, Cp = 4180.0, T_inlet = 30.0;
-    double rtol = 1e-6; int maxiter = 1000;
-    // Conductivity interpolation: 0=linear, 1=RAMP (for TO), 2=harmonic (consistent energy)
-    int k_interp_mode = 0;  // 0=linear (default), 1=RAMP, 2=harmonic
-    double qk = 1.0;  // RAMP penalization parameter (paper uses [1,3,10,30] sequence)
+// ============================================================================
+// Simulation Parameters
+// ============================================================================
+// Reference: Yan et al. (2019), Equations 4, 7, 13
+//
+// RAMP interpolation for thermal conductivity (Eq. 13):
+//   k(γ) = k_f + (k_s - k_f) * (1 - γ) / (1 + q_k * γ)
+//
+// Continuation strategy for q_k:
+//   Start with q_k = 1 (mild penalization)
+//   Gradually increase: 1 → 3 → 10 → 30
+//   This avoids local minima while ensuring final design is discrete
+// ============================================================================
+struct Params {
+    // Grid dimensions
+    int Nx = 0, Ny = 0;
+    int nz_solid = 2;        // Z-layers in base plate
+    int nz_fluid = 7;        // Z-layers in channel region
     
+    // Physical dimensions [m]
+    double Lx = 0, Ly = 0;
+    double H_b = 0.0005;     // Base plate thickness
+    double H_t = 0.004;      // Channel height
+    
+    // Material properties
+    double k_s = 400.0;      // Solid thermal conductivity [W/m-K]
+    double k_f = 0.6;        // Fluid thermal conductivity [W/m-K]
+    double rho = 998.0;      // Fluid density [kg/m³]
+    double Cp = 4180.0;      // Fluid specific heat [J/kg-K]
+    double T_inlet = 30.0;   // Inlet temperature [°C]
+    
+    // Solver settings
+    double rtol = 1e-6;
+    int maxiter = 1000;
+    
+    // =========================================================================
+    // RAMP Interpolation Settings
+    // =========================================================================
+    // k_interp_mode:
+    //   0 = Linear (WARNING: NOT for topology optimization!)
+    //   1 = RAMP (DEFAULT - use for topology optimization)
+    //   2 = Harmonic (alternative, very aggressive penalization)
+    //
+    // qk: RAMP convexity parameter
+    //   Higher qk = stronger penalization of intermediate γ
+    //   Continuation sequence: 1 → 3 → 10 → 30
+    // =========================================================================
+    int k_interp_mode = 1;      // RAMP interpolation
+    double qk = 1.0;            // RAMP parameter (increase during optimization)
+    
+    // Derived quantities
     double dx() const { return Lx / Nx; }
-     double dy() const { return Ly / Ny; }
-     double dz_s() const { return H_b / nz_solid; }
-     double dz_f() const { return H_t / nz_fluid; }
-     int Nz() const { return nz_solid + nz_fluid; }
-     int n_dofs() const { return Nx * Ny * Nz(); }
- };
+    double dy() const { return Ly / Ny; }
+    double dz_s() const { return H_b / nz_solid; }
+    double dz_f() const { return H_t / nz_fluid; }
+    int Nz() const { return nz_solid + nz_fluid; }
+    int n_dofs() const { return Nx * Ny * Nz(); }
+};
+
+// Include thermal output module (needs Params definition above)
+#include "thermal_output.cpp"
  
- vector<vector<double>> read_2d(const string& path, int& rows, int& cols) {
+// ============================================================================
+// Optimization Results Structure
+// ============================================================================
+// Used for topology optimization objective and sensitivity computation
+// Reference: Yan et al. (2019), Equation 16 (p-norm aggregation)
+// ============================================================================
+struct OptimizationResults {
+    double Tb_max;              // True maximum base temperature [°C]
+    double Tb_pnorm;            // p-norm approximation of max temperature [°C]
+    double energy_imbalance;    // Energy balance validation metric [%]
+    vector<double> dJ_dgamma;   // Sensitivity gradient dJ/dγ for each cell
+};
+
+vector<vector<double>> read_2d(const string& path, int& rows, int& cols) {
      ifstream f(path); if (!f) { cerr << "Cannot open: " << path << endl; return {}; }
      vector<vector<double>> data; string line;
      while (getline(f, line)) {
@@ -184,32 +242,180 @@
         return (g > 0.01) ? 1 : 0;  // Any gamma > 0 means fluid (includes buffers)
     }
      
-     // Thermal conductivity with configurable interpolation
-   // Mode 0 (Linear): k = k_s * (1-gamma) + k_f * gamma
-   // Mode 1 (RAMP): k = k_f + (k_s - k_f) * (1-gamma) / (1 + qk*gamma)  [Paper Eq. 13]
-   // Mode 2 (Harmonic): k = k_s*k_f / ((1-gamma)*k_f + gamma*k_s) - consistent with velocity penalization
-   double kval(int i, int j, int k) const { 
-       if (k < p.nz_solid) return p.k_s;  // Base plate always solid conductivity
-       double g = gamma[j*p.Nx+i];
-       
-       if (p.k_interp_mode == 1) {
-           // RAMP interpolation (Zeng & Lee paper, Eq. 13)
-           // For optimization: penalizes intermediate gamma toward extremes
-           return p.k_f + (p.k_s - p.k_f) * (1.0 - g) / (1.0 + p.qk * g);
-       } else if (p.k_interp_mode == 2) {
-           // Harmonic mean interpolation - physically correct for layers in series
-           // Consistent with velocity penalization for energy balance
-           // At gamma=0.5: k = 1.2 W/m-K (vs 200 W/m-K linear)
-           return p.k_s * p.k_f / ((1.0 - g) * p.k_f + g * p.k_s + 1e-30);
-       } else {
-           // Linear interpolation (default)
-           return p.k_s * (1.0 - g) + p.k_f * g;
-       }
-   }
+    // =========================================================================
+    // Thermal Conductivity k(γ) - RAMP Interpolation
+    // =========================================================================
+    // Reference: Yan et al. (2019), Equation 13
+    //
+    // RAMP formula:
+    //   k(γ) = k_f + (k_s - k_f) * (1 - γ) / (1 + q_k * γ)
+    //
+    // Example with k_s=400, k_f=0.6:
+    //   ┌────────┬──────────┬──────────┬──────────┬──────────┐
+    //   │   γ    │  Linear  │ RAMP q=1 │ RAMP q=10│ RAMP q=30│
+    //   ├────────┼──────────┼──────────┼──────────┼──────────┤
+    //   │  0.00  │  400.0   │  400.0   │  400.0   │  400.0   │
+    //   │  0.25  │  300.2   │  240.1   │  137.1   │   85.5   │
+    //   │  0.50  │  200.3   │  133.5   │   36.3   │   13.5   │ 
+    //   │  0.75  │  100.5   │   66.8   │    9.8   │    3.6   │
+    //   │  1.00  │    0.6   │    0.6   │    0.6   │    0.6   │
+    //   └────────┴──────────┴──────────┴──────────┴──────────┘
+    //
+    // Notice how RAMP severely penalizes γ=0.5:
+    //   Linear gives k=200 (very conductive, favorable)
+    //   RAMP q=10 gives k=36 (poor, unfavorable)
+    //
+    // This pushes the optimizer away from intermediate densities.
+    // =========================================================================
+    double kval(int i, int j, int k) const {
+        // Base plate (below channel) is always solid
+        if (k < p.nz_solid) {
+            return p.k_s;
+        }
+        
+        // Get and clamp gamma
+        double g = gamma[j * p.Nx + i];
+        g = max(0.0, min(1.0, g));
+        
+        switch (p.k_interp_mode) {
+            case 1: {
+                // RAMP interpolation (RECOMMENDED for topology optimization)
+                // k(γ) = k_f + (k_s - k_f) * (1 - γ) / (1 + q_k * γ)
+                double num = 1.0 - g;
+                double den = 1.0 + p.qk * g;
+                return p.k_f + (p.k_s - p.k_f) * num / den;
+            }
+            case 2: {
+                // Harmonic mean (alternative, very aggressive)
+                // k = k_s * k_f / ((1-γ)*k_f + γ*k_s)
+                return p.k_s * p.k_f / ((1.0 - g) * p.k_f + g * p.k_s + 1e-30);
+            }
+            default: {
+                // Linear (mode 0) - WARNING: NOT for optimization!
+                // Only use for validating existing discrete designs
+                return p.k_s * (1.0 - g) + p.k_f * g;
+            }
+        }
+    }
+    
+    // =========================================================================
+    // RAMP Derivative for Adjoint Computation
+    // =========================================================================
+    // Derivative of k(γ) with respect to γ for sensitivity analysis
+    //
+    // k(γ) = k_f + (k_s - k_f) * (1-γ) / (1 + q_k*γ)
+    //
+    // Using quotient rule:
+    //   dk/dγ = (k_s - k_f) * d/dγ[(1-γ)/(1+q_k*γ)]
+    //         = (k_s - k_f) * [(-1)(1+q_k*γ) - (1-γ)(q_k)] / (1+q_k*γ)²
+    //         = (k_s - k_f) * [-(1+q_k*γ) - q_k(1-γ)] / (1+q_k*γ)²
+    //         = (k_s - k_f) * [-(1 + q_k)] / (1+q_k*γ)²
+    //
+    // Note: dk/dγ < 0 always (conductivity decreases as γ increases toward fluid)
+    // =========================================================================
+    double dk_dgamma(double g) const {
+        g = max(0.0, min(1.0, g));
+        double den = 1.0 + p.qk * g;
+        return (p.k_s - p.k_f) * (-(1.0 + p.qk)) / (den * den);
+    }
+    
     double pois(int k) const {
         if (k < p.nz_solid) return 0;
         double z = (k - p.nz_solid + 0.5) * p.dz_f() / p.H_t;
         return 4.0 * z * (1 - z);  // Max = 1.0 at centerline (for max velocity input)
+    }
+    
+    // =========================================================================
+    // P-Norm Objective Computation
+    // =========================================================================
+    // Reference: Yan et al. (2019), Equation 16
+    //
+    // The p-norm provides a smooth, differentiable approximation to max(T):
+    //   J_pnorm = (1/N * Σ T_i^p)^(1/p)
+    //
+    // As p → ∞, J_pnorm → max(T)
+    // Typical values: p = 8-12 (balance between smoothness and accuracy)
+    //
+    // Advantages over true max:
+    //   - Differentiable everywhere (needed for gradient-based optimization)
+    //   - Considers contribution from all hot spots (more robust)
+    //   - Smooth sensitivity field (better optimizer convergence)
+    // =========================================================================
+    double compute_pnorm_objective(int pnorm_exp = 10) const {
+        int Nx = p.Nx, Ny = p.Ny;
+        int N_substrate = Nx * Ny;  // Only bottom layer (k=0, substrate surface)
+        
+        double sum_Tp = 0.0;
+        for (int j = 0; j < Ny; j++) {
+            for (int i = 0; i < Nx; i++) {
+                // Temperature at bottom of substrate (k=0)
+                double Tb = T[idx(i, j, 0)];
+                sum_Tp += std::pow(Tb, pnorm_exp);
+            }
+        }
+        return std::pow(sum_Tp / N_substrate, 1.0 / pnorm_exp);
+    }
+    
+    // Compute optimization results including p-norm and true max
+    OptimizationResults compute_optimization_results(int pnorm_exp = 10) const {
+        OptimizationResults res;
+        int Nx = p.Nx, Ny = p.Ny;
+        
+        // Compute true max and p-norm
+        res.Tb_max = -1e30;
+        double sum_Tp = 0.0;
+        for (int j = 0; j < Ny; j++) {
+            for (int i = 0; i < Nx; i++) {
+                double Tb = T[idx(i, j, 0)];
+                res.Tb_max = max(res.Tb_max, Tb);
+                sum_Tp += std::pow(Tb, pnorm_exp);
+            }
+        }
+        res.Tb_pnorm = std::pow(sum_Tp / (Nx * Ny), 1.0 / pnorm_exp);
+        
+        // Placeholder for sensitivity (requires adjoint solve)
+        res.dJ_dgamma.resize(Nx * Ny, 0.0);
+        
+        return res;
+    }
+    
+    // =========================================================================
+    // Export Optimization Results
+    // =========================================================================
+    // Saves objective function values and sensitivity field for MMA optimizer
+    //
+    // Output files:
+    //   objective.txt   - Line 1: Tb_max (true max)
+    //                   - Line 2: Tb_pnorm (p-norm approximation)
+    //                   - Line 3: p value used
+    //                   - Line 4: energy imbalance [%]
+    //   dJ_dgamma.txt   - Sensitivity field (Ny rows × Nx cols, tab-separated)
+    // =========================================================================
+    void save_optimization_outputs(const string& dir, const OptimizationResults& opt_res) {
+        int Nx = p.Nx, Ny = p.Ny;
+        
+        // Objective function values
+        ofstream obj_file(dir + "/objective.txt");
+        obj_file << fixed << setprecision(10);
+        obj_file << opt_res.Tb_max << "\n";
+        obj_file << opt_res.Tb_pnorm << "\n";
+        obj_file << "10\n";  // p value used
+        obj_file << opt_res.energy_imbalance << "\n";
+        obj_file.close();
+        cout << "Saved: " << dir << "/objective.txt" << endl;
+        
+        // Sensitivity field (after adjoint solve - see Section 4)
+        ofstream sens_file(dir + "/dJ_dgamma.txt");
+        sens_file << fixed << setprecision(10);
+        for (int j = 0; j < Ny; j++) {
+            for (int i = 0; i < Nx; i++) {
+                sens_file << opt_res.dJ_dgamma[j * Nx + i];
+                if (i < Nx - 1) sens_file << "\t";
+            }
+            sens_file << "\n";
+        }
+        sens_file.close();
+        cout << "Saved: " << dir << "/dJ_dgamma.txt" << endl;
     }
      
     void solve() {
@@ -239,9 +445,23 @@
                         int P = idx(i, j, k);
                         double diag = 0, kP = kval(i,j,k), po = pois(k);
                         
-                        // No additional velocity penalization - CFD solver already applies Brinkman
-                        // The u_xy, v_xy fields are already penalized by the CFD Brinkman term
+                        // =============================================================
+                        // Velocity for Advection Term
+                        // =============================================================
+                        // IMPORTANT: The CFD solver ALREADY penalizes velocity via 
+                        // Brinkman term (α·u). The u_xy/v_xy fields we receive are
+                        // already reduced in solid/buffer regions.
+                        //
+                        // DO NOT multiply by gamma again - that would double-penalize!
+                        //
+                        // We only zero out velocity in essentially-solid regions
+                        // (γ < 0.01) to eliminate numerical noise from CFD solver.
+                        // =============================================================
                         double g = (k < p.nz_solid) ? 0.0 : gamma[j*Nx+i];
+                        g = max(0.0, min(1.0, g));
+                        
+                        // Use CFD velocity directly (already Brinkman-penalized)
+                        // Only zero out in solid regions to prevent numerical noise
                         double uP = (g > 0.01) ? u_xy[j*Nx+i] * po : 0.0;
                         double vP = (g > 0.01) ? v_xy[j*Nx+i] * po : 0.0;
                         
@@ -436,15 +656,53 @@
     }
 };
 
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+// Usage: thermal_solver [directory] [qk] [mode]
+//
+// Arguments:
+//   directory : Path to ExportFiles (default: ../ExportFiles)
+//   qk        : RAMP parameter (default: 1.0, continuation: 1→3→10→30)
+//   mode      : Interpolation mode (default: 1=RAMP)
+//
+// Examples:
+//   ./thermal_solver                     # Use defaults
+//   ./thermal_solver ../ExportFiles 10   # Use qk=10 for later optimization stage
+//   ./thermal_solver ../ExportFiles 30 1 # Final stage, RAMP mode
+// ============================================================================
 int main(int argc, char* argv[]) {
-     string dir = argc > 1 ? argv[1] : "../ExportFiles";
-     cout << "=== 3D CHT Solver ===" << endl;
-     
-     Params p;
-     int M, N; double dx, dy, Ht, qf;
-     ifstream pf(dir + "/thermal_params.txt");
-     pf >> M >> N >> dx >> dy >> qf >> Ht;
-     p.H_t = Ht;
+    string dir = (argc > 1) ? argv[1] : "../ExportFiles";
+    
+    Params p;
+    
+    // Parse optional command-line RAMP parameters
+    if (argc > 2) p.qk = atof(argv[2]);
+    if (argc > 3) p.k_interp_mode = atoi(argv[3]);
+    
+    cout << "=== 3D Conjugate Heat Transfer Solver ===" << endl;
+    cout << "Reference: Yan et al. (2019) Two-Layer Model" << endl;
+    cout << "Data directory: " << dir << endl;
+    cout << endl;
+    
+    // Report interpolation settings
+    const char* mode_names[] = {"Linear (NOT for TO!)", "RAMP", "Harmonic"};
+    cout << "Interpolation: " << mode_names[p.k_interp_mode] << endl;
+    if (p.k_interp_mode == 1) {
+        cout << "  q_k = " << p.qk << " (continuation: 1→3→10→30)" << endl;
+    }
+    cout << endl;
+    
+    // Load parameters from file
+    int M, N;
+    double dx, dy, Ht, qf;
+    ifstream pf(dir + "/thermal_params.txt");
+    if (!pf) {
+        cerr << "Error: Cannot open " << dir << "/thermal_params.txt" << endl;
+        return 1;
+    }
+    pf >> M >> N >> dx >> dy >> qf >> Ht;
+    p.H_t = Ht;
      
      int rows, cols;
      // Load geometry_thermal.txt (supports binary or continuous values)
@@ -490,6 +748,20 @@ int main(int argc, char* argv[]) {
      
      s.solve();
      s.save_vtk(dir + "/thermal_results_3d.vtk");
+     
+     // Compute and export thermal metrics
+     ThermalMetrics metrics = compute_thermal_metrics(s.T, s.gamma, s.dz_cells, p);
+     print_thermal_metrics(metrics);
+     save_thermal_metrics(metrics, dir);
+     
+     // Export thermal conductivity field for MMA optimizer
+     print_k_statistics(s.gamma, p);
+     save_k_field(s.gamma, p, dir);
+     
+     // Compute and export gradient field for visualization
+     GradientField grad_field = compute_gradient_field(s.T, s.dz_cells, p);
+     save_gradient_vtk(grad_field, s.dz_cells, p, dir + "/thermal_gradient_3d.vtk");
+     
      return 0;
  }
  

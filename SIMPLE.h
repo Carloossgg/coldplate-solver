@@ -3,12 +3,12 @@
 // Author: Peter Tcherkezian
 // ============================================================================
 // Description:
-//   Core interface and parameters for the incompressible laminar SIMPLE/SIMPLEC
+//   Core interface and parameters for the incompressible laminar SIMPLE
 //   solver on a structured Cartesian grid using the Finite Volume Method (FVM).
 //
 //   This header serves as the CENTRAL REGISTRY for:
 //     1. All solver control parameters (relaxation, CFL ramps, convergence criteria)
-//     2. Algorithm toggles (SIMPLE vs SIMPLEC, direct vs SOR pressure solve)
+//     2. Algorithm options (direct vs iterative pressure solve)
 //     3. Physics options (2.5D model, Brinkman penalization for topology optimization)
 //     4. Staggered grid field storage (u, v, p matrices)
 //     5. Geometry and boundary condition data structures
@@ -46,6 +46,7 @@
 #include <chrono>
 #include <deque>
 #include <omp.h>
+#include "Utilities/Timer.h"
 
 #include <Eigen/Sparse>
 #include <Eigen/Dense>
@@ -64,8 +65,8 @@ public:
     //   2. Pressure drop stabilizes (if usePressureDropConvergence=true), OR
     //   3. maxIterations is reached
     
-    double epsilon       = 1e-7;      // Target residual threshold for convergence (lower = tighter)
-    int    maxIterations = 100000;    // Maximum outer SIMPLE iterations (safety limit)
+    float  epsilon       = 1e-5f;     // Target residual threshold (float precision = 1e-6 is safer)
+    int    maxIterations = 10000;    // Maximum outer SIMPLE iterations (safety limit)
     
     // =========================================================================
     // OUTPUT & RESTART CONTROL
@@ -73,7 +74,7 @@ public:
     // Checkpointing allows resuming from saved state if solver crashes or
     // you want to refine the solution further.
     
-    int    saveStateInterval = 600;   // Save checkpoint every N iterations (0 = disable)
+    int    saveStateInterval = 1000;   // Save checkpoint every N iterations (0 = disable)
     bool   reuseInitialFields = false;// If true, load u.txt/v.txt/p.txt as initial guess
     std::string restartDirectory = "ExportFiles";  // Directory for restart files
 
@@ -84,8 +85,8 @@ public:
     // "Core" planes exclude inlet/outlet buffers for cleaner pressure drop measurement.
     // "Full" planes span the entire domain (auto-calculated: 0 to N*hx).
     
-    double xPlaneCoreInlet  = 0.01;   // Core inlet sampling plane [m] (after inlet buffer)
-    double xPlaneCoreOutlet = 0.050;  // Core outlet sampling plane [m] (before outlet buffer)
+    float xPlaneCoreInlet  = 0.01f;   // Core inlet sampling plane [m] (after inlet buffer)
+    float xPlaneCoreOutlet = 0.050f;  // Core outlet sampling plane [m] (before outlet buffer)
 
     // =========================================================================
     // PRESSURE-DROP BASED CONVERGENCE
@@ -95,11 +96,11 @@ public:
     // (pressure drop) has already converged.
     
     bool   usePressureDropConvergence = true;   // Enable this convergence mode
-    int    dpConvergenceWindow = 1500;          // Moving window size [iterations]
-    double dpConvergencePercent = 1.0;          // Converged if std_dev < this % of mean
+    int    dpConvergenceWindow = 500;          // Moving window size [iterations]
+    float  dpConvergencePercent = 1.0f;         // Converged if std_dev < this % of mean
     bool   usePressureDropSlopeGate = false;    // Additional check: slope must be near-zero
     int    dpSlopeWindowIters = 1000;           // Window for slope calculation
-    double dpSlopeMaxDelta   = 10.0;            // Max allowed Δp change [Pa] over window
+    float  dpSlopeMaxDelta   = 10.0f;           // Max allowed Δp change [Pa] over window
     
     // =========================================================================
     // PARALLELIZATION (OpenMP)
@@ -110,34 +111,76 @@ public:
     int numThreads = 8;  // Number of OpenMP threads (recommend: physical core count)
     
     // =========================================================================
-    // ALGORITHM SELECTION: SIMPLE vs SIMPLEC
-    // =========================================================================
-    // SIMPLE  (Semi-Implicit Method for Pressure-Linked Equations):
-    //   - Original Patankar-Spalding algorithm
-    //   - Uses under-relaxation for stability
-    //   - d = A / a_P  where a_P already includes neighbor coefficients
-    //
-    // SIMPLEC (SIMPLE-Consistent):
-    //   - Improved variant by Van Doormaal & Raithby
-    //   - Uses d = A / (a_P - Σa_nb)  [more consistent pressure-velocity coupling]
-    //   - Often allows larger relaxation factors → faster convergence
-    
-    bool useSIMPLEC = false;  // true = SIMPLEC, false = standard SIMPLE
-    
-    // =========================================================================
     // PRESSURE CORRECTION SOLVER OPTIONS
     // =========================================================================
-    // Two options for solving the pressure-correction (Poisson) equation:
-    //   1. Direct: Eigen SimplicialLDLT factorization (fast, memory-intensive)
-    //   2. Iterative: Successive Over-Relaxation (SOR) with red-black ordering
-    
-    bool useDirectPressureSolver = true;  // true = direct LDLT, false = SOR
+    // Four options for solving the pressure-correction (Poisson) equation:
+    //
+    //   pressureSolverType = 0: SOR (Successive Over-Relaxation)
+    //      - Red-black ordering, partially parallelized
+    //      - Slowest iterative option
+    //
+    //   pressureSolverType = 1: Parallel CG (Jacobi preconditioned)
+    //      - Fully parallelized (SpMV, dot products, AXPY)
+    //      - Good performance, no external dependencies
+    //
+    //   pressureSolverType = 2: AMGCL (Algebraic Multigrid + CG) [FASTEST for large]
+    //      - AMG preconditioner with CG Krylov solver
+    //      - Best for large systems (>10k DOFs)
+    //      - Requires compile with -DUSE_AMGCL flag
+    //      - Include path: -I"ThermalSolver/amgcl"
+    //
+    //   pressureSolverType = 3: Direct LDLT (Eigen SimplicialLDLT)
+    //      - Direct sparse Cholesky factorization
+    //      - SERIAL (single-threaded) but no iterations
+    //      - Best for small systems (<5k DOFs)
+    //      - Pattern cached for speed across iterations
+    //
+    //   pressureSolverType = 4: AMGCL-CUDA (GPU version of AMGCL) [RECOMMENDED GPU]
+    //      - Same algorithm as CPU AMGCL but runs on GPU
+    //      - Requires NVIDIA GPU and CUDA Toolkit
+    //      - Compile with build_with_amgcl_cuda.bat
+    //      - Uses single precision (float) for 2x speed on GPU
+    //      - BEST OPTION for GPU: Same convergence as CPU, but faster!
+    //
+    int pressureSolverType = 4;    // 0=SOR, 1=PCG, 2=AMGCL(CPU), 3=LDLT, 4=AMGCL-CUDA(GPU)
     bool parallelizeDirectSolver = true;  // Parallelize matrix assembly (recommended)
     
-    // SOR-specific parameters (only used when useDirectPressureSolver = false):
-    int    maxPressureIter = 50;   // Max inner pressure sweeps per outer iteration
-    double sorOmega = 0.0;         // SOR relaxation factor (0 = auto-compute optimal ω)
-    double pTol = 1e-4;            // Pressure correction convergence tolerance
+    // Solver iteration parameters:
+    // Note: AMGCL typically converges in 5-30 iterations (AMG is very effective!)
+    //       Parallel CG needs 50-200 iterations (Jacobi preconditioner is weaker)
+    //       If AMGCL hits maxIter, try relaxing tolerance or check matrix conditioning
+    int   maxPressureIter = 20;    // Max iterations (30 for AMGCL, 200 for PCG/SOR)
+    float pTol = 1e-4f;            // Convergence tolerance (relaxed to 1e-5 for float precision)
+    
+    // SOR-specific parameters (only used when pressureSolverType = 0):
+    float sorOmega = 0.0f;         // SOR relaxation factor (0 = auto-compute optimal ω)
+
+    // =========================================================================
+    // MOMENTUM SOLVER OPTIONS (Jacobi/SOR)
+    // =========================================================================
+    // Controls how momentum equations (U, V) are solved each SIMPLE iteration.
+    //
+    //   momentumSolverType = 0: Explicit (Point Gauss-Seidel) [ORIGINAL]
+    //      - Updates each cell explicitly using neighbors from current iteration
+    //      - Simple but slow convergence, especially for stiff problems
+    //
+    //   momentumSolverType = 1: Implicit Jacobi/SOR [RECOMMENDED]
+    //      - Assembles full momentum matrix and solves with Jacobi/SOR
+    //      - GPU: cuSPARSE SpMV + CUDA kernel (fast, parallel)
+    //      - CPU: OpenMP-parallelized Jacobi/SOR
+    //
+    int momentumSolverType = 1;    // 0=Explicit, 1=Implicit Jacobi/SOR
+    
+    // Momentum solver tolerance and iterations
+    // Momentum solver tolerance and iterations
+    float  momentumTol = 1e-5f;      // Convergence tolerance for momentum solver
+    int    maxMomentumIter = 200;    // Max iterations for Jacobi/SOR
+    
+    // SOR (Successive Over-Relaxation) for momentum solver
+    // omega = 1.0: Pure Jacobi
+    // omega > 1.0: SOR (faster convergence, 1.2-1.8 typical)
+    // omega < 1.0: Under-relaxation (more stable)
+    float  momentumSorOmega = 1.0f;  // Relaxation factor (1.0 = Jacobi, >1 = SOR)
 
     // =========================================================================
     // CONVECTION SCHEME
@@ -159,9 +202,10 @@ public:
     //
     // Reference: "Two-layer microchannel model" for topology optimization
     
-    bool   enableTwoPointFiveD = true;    // Enable 2.5D out-of-plane corrections
-    double Ht_channel = 0.0;              // Out-of-plane channel height [m] (from geometry file)
-    double twoPointFiveDSinkMultiplier = 4.8; // Multiplier on base sink coefficient
+    bool   enableTwoPointFiveD = false;    // Enable 2.5D friction term: F = -(5μ/2Ht²) * multiplier * u
+    bool   enableConvectionScaling = false; // Enable 6/7 convection scaling (independent control)
+    float  Ht_channel = 0.0f;             // Out-of-plane channel height [m] (from geometry file)
+    float  twoPointFiveDSinkMultiplier = 4.8f; // Multiplier on base sink coefficient
         // Base = (5/2)μ/Ht²; multiplier ≈4.8 gives 12μ/Ht² (parallel-plate friction)
 
     // =========================================================================
@@ -174,15 +218,30 @@ public:
     //   - 0 < γ < 1 → transition zone (gradual drag)
     //
     // Brinkman penalization adds a Darcy-like drag term to momentum:
-    //   F = -α(γ) * u,  where α(γ) = α_max * (1 - γ)
+    //   F = -α(γ) * u
     //
-    // α_max is computed from the Darcy number: α_max = μ / (Da * L²)
-    // Lower Da → stronger penalization → more "solid-like" behavior
+    // Per Haertel et al. (Eq. 17), α uses RAMP interpolation:
+    //   α(γ) = α_max * (1 - γ) / (1 + q * γ)
+    //
+    // With q=1 (Haertel final value), this penalizes intermediate γ:
+    //   - γ=1 (fluid): α = 0 (no drag)
+    //   - γ=0.5 (buffer): α = 0.33 * α_max (strong drag)
+    //   - γ=0 (solid): α = α_max (full drag)
+    //
+    // α_max should be tied to MATERIAL permeability (mesh/domain independent):
+    //   α_max = μ / K_min
+    // where K_min is the "solid-side" permeability [m^2].
+    //
+    // This is the physically clean SIMP/Brinkman form and remains consistent
+    // across geometry sizes and mesh refinements.
     //
     // Reference: Haertel et al., "Topology optimization of microchannel heat sinks"
     
-    double brinkmanDarcyNumber = 1e-5;  // Darcy number Da (lower = stronger penalization)
-    double brinkmanAlphaMax = 0.0;      // Computed at runtime: μ / (Da * L_c²)
+    // Default K_min keeps the same α_max as previous defaults:
+    // Da = 1e-8 and L_ref = 1e-3 m -> K_min = 1e-14 m^2
+    float  brinkmanKMin = 1e-14f;       // Solid-side permeability K_min [m^2]
+    float  brinkmanAlphaMax = 0.0f;     // Computed at runtime: μ / K_min
+    float  brinkmanQ = 1.0f;            // RAMP convexity parameter (Haertel: 1-8, use 1 for strong penalization)
 
     // =========================================================================
     // PSEUDO-TRANSIENT TIME STEPPING
@@ -198,28 +257,60 @@ public:
     // CFL ramping increases CFL as residuals decrease, accelerating convergence
     // once the solution is close to steady state.
     
-    double timeStepMultiplier = 0.01;     // Global Δt = multiplier * (Lx / U_inlet)
-    double timeStep = 0.0;                // Computed global pseudo time step [s]
-    bool   enablePseudoTimeStepping = true; // Master switch for pseudo-transient
-    double pseudoCFL = 0.1;               // Current CFL number (updated by ramp)
-    double minPseudoSpeed = 0.05;         // Minimum velocity for CFL calculation [m/s]
+    float  timeStepMultiplier = 0.01f;    // Global Δt = multiplier * (Lx / U_inlet)
+    float  timeStep = 0.0f;               // Computed global pseudo time step [s]
+    bool   enablePseudoTimeStepping = false; // Master switch for pseudo-transient
+    float  pseudoCFL = 0.1f;              // Current CFL number (updated by ramp)
+    float  minPseudoSpeed = 0.05f;        // Minimum velocity for CFL calculation [m/s]
     bool   useLocalPseudoTime = true;     // true = local CFL, false = global Δt
     bool   logPseudoDtStats = false;      // Print min/max/avg pseudo-Δt each iteration
     
-    double pseudoRefLength = 0.0;         // Reference length for CFL [m] (0 = auto)
+    float  pseudoRefLength = 0.0f;        // Reference length for CFL [m] (0 = auto)
 
+    // -------------------------------------------------------------------------
+    // Switched Evolution Relaxation (SER) - Mulder & van Leer
+    // -------------------------------------------------------------------------
+    // SER adjusts CFL based on residual reduction ratio:
+    //   CFL^k = min(CFL^(k-1) * |R^(k-1)| / |R^k|, CFL_max)
+    // If residual decreases, CFL increases proportionally.
+    // If residual increases, CFL decreases proportionally.
+    // When enabled, this DISABLES other CFL ramping mechanisms.
+    bool   enableSER        = true;       // Enable SER (disables other CFL ramps)
+    float  serCFLMin        = 0.1f;       // Minimum CFL for SER
+    float  serCFLMax        = 5.0f;      // Maximum CFL for SER (reduced for stability)
+    float  serResidPrev     = 0.0f;       // Previous iteration L2 residual (for tracking)
+    float  serSmooth        = 0.5f;       // Smoothing factor (0 = no smoothing, 1 = full new) - increased for stability
+    int    serMinIter       = 10;         // Don't apply SER until this many iterations - increased for stability
+    float  serMaxIncrease   = 1.1f;      // Max CFL increase per iteration (5%)
+    float  serMaxDecrease   = 0.7f;       // Max CFL decrease per iteration (Lower value is more aggressive decrease by 30%)
+    bool   serUseMaxResid   = false;       // true = use max(U,V,Mass), false = use Mass only
+    
+    // Line search for robustness (coupled with SER)
+    // Ensures solution updates actually reduce residuals
+    // If residual increases too much, temporarily reduce CFL to stabilize
+    bool   enableLineSearch = true;       // Enable backtracking line search
+    float  lsAlphaMin       = 0.1f;       // Minimum step size (don't go below this)
+    float  lsAlphaReduce    = 0.3f;       // Reduction factor for backtracking (try α, α/3, α/9, ...)
+    int    lsMaxTries       = 4;          // Max backtracking attempts
+    float  lsResidIncreaseTol = 1.01f;    // Backtrack if residual increases by 1% (extreme sensitivity)
+    float  lsCurrentAlpha   = 1.0f;       // Current line search step size (1.0 = full step)
+    int    lsBacktrackCount = 0;          // Number of backtracks in current iteration
+    
+    // -------------------------------------------------------------------------
     // CFL ramping parameters (residual-based acceleration):
+    // -------------------------------------------------------------------------
+    // NOTE: Disabled when enableSER = true
     bool   enableCflRamp    = true;       // Enable automatic CFL increase
-    double pseudoCFLInitial = 0.1;        // Starting CFL (conservative)
-    double pseudoCFLMax     = 5;          // Maximum CFL (aggressive)
-    double cflRampStartRes  = 5e-4;       // Begin ramping when residual drops below this
-    double cflRampExponent  = 0.8;        // CFL ∝ (Res_start / Res_current)^exponent
-    double cflRampSmooth    = 0.1;        // Smoothing factor (0.1 = 90% old + 10% new)
+    float  pseudoCFLInitial = 0.1f;       // Starting CFL (0.1 is a more conservative value)
+    float  pseudoCFLMax     = 30.0f;      // Maximum CFL (reduced for stability) 
+    float  cflRampStartRes  = 1e-4f;      // Begin ramping later
+    float  cflRampExponent  = 0.8f;       // CFL ∝ (Res_start / Res_current)^exponent
+    float  cflRampSmooth    = 0.1f;       // Smoothing factor (0.1 = 90% old + 10% new)
     
     // Transient residual tracking (monitors convergence to true steady state):
     // At true steady state, these should approach zero
-    double transientResidU = 0.0;   // max |ρV/Δt * (u_new - u_old)| for U-momentum
-    double transientResidV = 0.0;   // max |ρV/Δt * (v_new - v_old)| for V-momentum
+    float  transientResidU = 0.0f;   // max |ρV/Δt * (u_new - u_old)| for U-momentum
+    float  transientResidV = 0.0f;   // max |ρV/Δt * (v_new - v_old)| for V-momentum
 
     // =========================================================================
     // GRID DIMENSIONS & SPACING
@@ -231,8 +322,8 @@ public:
     int N = 0;       // Number of columns (x-direction cells)
     int N_in_buffer = 0;   // Inlet buffer zone columns (for thermal cropping)
     int N_out_buffer = 0;  // Outlet buffer zone columns (for thermal cropping)
-    double hy = 0.0; // Cell height [m] (Δy)
-    double hx = 0.0; // Cell width [m] (Δx)
+    float hy = 0.0f; // Cell height [m] (Δy)
+    float hx = 0.0f; // Cell width [m] (Δx)
 
     // =========================================================================
     // FLUID PROPERTIES
@@ -240,8 +331,8 @@ public:
     // Properties for water at 20°C. These are HARDCODED here and NOT read from
     // the geometry file, ensuring consistent physics across geometry variations.
     
-    double rho = 997.0;       // Fluid density [kg/m³]
-    double eta = 0.00089;     // Dynamic viscosity [Pa·s] (μ)
+    float rho = 997.0f;       // Fluid density [kg/m³]
+    float eta = 0.00089f;     // Dynamic viscosity [Pa·s] (μ)
 
     // =========================================================================
     // INLET VELOCITY & RAMPING
@@ -249,8 +340,8 @@ public:
     // Inlet ramping gradually increases velocity from 10% to 100% of target
     // over rampSteps iterations. This prevents numerical instabilities at startup.
     
-    double targetVel        = 0.0;    // Final inlet velocity [m/s] (from geometry file)
-    double inletVelocity    = 0.0;    // Current inlet velocity [m/s] (may be ramped)
+    float  targetVel        = 0.0f;   // Final inlet velocity [m/s] (from geometry file)
+    float  inletVelocity    = 0.0f;   // Current inlet velocity [m/s] (may be ramped)
     bool   enableInletRamp  = false;  // Enable gradual inlet velocity ramp
     int    rampSteps        = 1000;   // Iterations to reach full inlet velocity
 
@@ -263,8 +354,8 @@ public:
     // Lower values = more stable but slower convergence
     // Typical ranges: velocity 0.3-0.8, pressure 0.1-0.3
     
-    double uvAlpha = 0.5;    // Velocity under-relaxation factor (0 < α ≤ 1)
-    double pAlpha  = 0.2;    // Pressure under-relaxation factor (0 < α ≤ 1)
+    float uvAlpha = 0.7f;    // Velocity under-relaxation factor (reduced for stability)
+    float pAlpha  = 0.2f;    // Pressure under-relaxation factor (reduced for stability)
 
     // =========================================================================
     // RESIDUAL TRACKING
@@ -272,9 +363,9 @@ public:
     // Residuals measure how far the current solution is from satisfying the
     // governing equations. They should decrease each iteration toward epsilon.
     
-    double residU    = 1.0;  // Maximum U-velocity change (|u_new - u_old|)
-    double residV    = 1.0;  // Maximum V-velocity change (|v_new - v_old|)
-    double residMass = 1.0;  // Maximum mass imbalance (continuity equation error)
+    float residU    = 1.0f;  // Maximum U-velocity change (|u_new - u_old|)
+    float residV    = 1.0f;  // Maximum V-velocity change (|v_new - v_old|)
+    float residMass = 1.0f;  // Maximum mass imbalance (continuity equation error)
 
     // =========================================================================
     // PSEUDO-TIME STEP STATISTICS
@@ -283,9 +374,9 @@ public:
     // Useful for debugging CFL-based time stepping.
     
     struct PseudoDtStats {
-        double min = 0.0;       // Minimum pseudo-Δt in the domain
-        double max = 0.0;       // Maximum pseudo-Δt in the domain
-        double avg = 0.0;       // Average pseudo-Δt
+        float min = 0.0f;       // Minimum pseudo-Δt in the domain
+        float max = 0.0f;       // Maximum pseudo-Δt in the domain
+        float avg = 0.0f;       // Average pseudo-Δt
         long long samples = 0;  // Number of cells sampled
         bool valid = false;     // Whether stats were computed this iteration
     };
@@ -305,12 +396,12 @@ public:
     // v: vertical velocity at HORIZONTAL faces, size M x (N+1)
     //    v(i,j) = velocity at the bottom face of cell (i,j-1) / top face of (i-1,j-1)
     
-    Eigen::MatrixXd u;       // Current x-velocity field
-    Eigen::MatrixXd v;       // Current y-velocity field
-    Eigen::MatrixXd uStar;   // Intermediate u (after momentum solve, before correction)
-    Eigen::MatrixXd vStar;   // Intermediate v (after momentum solve, before correction)
-    Eigen::MatrixXd uOld;    // Previous iteration u (for residual calculation)
-    Eigen::MatrixXd vOld;    // Previous iteration v (for residual calculation)
+    Eigen::MatrixXf u;       // Current x-velocity field
+    Eigen::MatrixXf v;       // Current y-velocity field
+    Eigen::MatrixXf uStar;   // Intermediate u (after momentum solve, before correction)
+    Eigen::MatrixXf vStar;   // Intermediate v (after momentum solve, before correction)
+    Eigen::MatrixXf uOld;    // Previous iteration u (for residual calculation)
+    Eigen::MatrixXf vOld;    // Previous iteration v (for residual calculation)
 
     // =========================================================================
     // PRESSURE FIELD (Cell-Centered)
@@ -321,8 +412,8 @@ public:
     // pStar is the pressure CORRECTION (p' in SIMPLE algorithm), not the
     // intermediate pressure. Final pressure: p = p_old + α_p * p'
     
-    Eigen::MatrixXd p;       // Pressure field [Pa]
-    Eigen::MatrixXd pStar;   // Pressure correction field [Pa]
+    Eigen::MatrixXf p;       // Pressure field [Pa]
+    Eigen::MatrixXf pStar;   // Pressure correction field [Pa]
 
     // =========================================================================
     // MOMENTUM EQUATION COEFFICIENTS
@@ -333,9 +424,9 @@ public:
     //
     // They represent the sensitivity of velocity to pressure gradient.
     
-    Eigen::MatrixXd dE;      // d-coefficient for U-velocity correction
-    Eigen::MatrixXd dN;      // d-coefficient for V-velocity correction
-    Eigen::MatrixXd b;       // Work array (used internally)
+    Eigen::MatrixXf dE;      // d-coefficient for U-velocity correction
+    Eigen::MatrixXf dN;      // d-coefficient for V-velocity correction
+    Eigen::MatrixXf b;       // Work array (used internally)
 
     // =========================================================================
     // GEOMETRY FIELDS
@@ -344,21 +435,9 @@ public:
     // gamma:    Porosity/density field (1=fluid, 0=solid) - inverted from cellType
     // alpha:    Brinkman penalization coefficient (high = solid, low = fluid)
     
-    Eigen::MatrixXd cellType;  // Geometry from file (0=fluid, 1=solid)
-    Eigen::MatrixXd alpha;     // Brinkman α field: α = α_max * (1 - γ)
-    Eigen::MatrixXd gamma;     // Density field: γ = 1 (fluid), γ = 0 (solid)
-
-    // =========================================================================
-    // PRECOMPUTED FLUID MASKS
-    // =========================================================================
-    // Boolean masks indicating which locations are in fluid regions.
-    // Precomputed once after geometry load for fast lookup during iteration.
-    // Using flat std::vector instead of 2D array for cache efficiency.
-    
-    std::vector<bool> isFluidU;   // true if u(i,j) is in fluid (neither neighbor is solid)
-    std::vector<bool> isFluidV;   // true if v(i,j) is in fluid (neither neighbor is solid)
-    std::vector<bool> isFluidP;   // true if p(i,j) is in fluid (cell itself is not solid)
-    void buildFluidMasks();       // Compute masks from cellType (called after geometry load)
+    Eigen::MatrixXf cellType;  // Geometry from file (0=fluid, 1=solid)
+    Eigen::MatrixXf alpha;     // Brinkman α field: α = α_max * (1 - γ)
+    Eigen::MatrixXf gamma;     // Density field: γ = 1 (fluid), γ = 0 (solid)
 
     // =========================================================================
     // CONSTRUCTOR & INITIALIZATION
@@ -373,14 +452,17 @@ public:
     // =========================================================================
     
     void runIterations();                               // Main iteration loop: runs until convergence or max iterations
-    double calculateStep(int& pressureIterations);      // Perform ONE SIMPLE iteration (momentum → pressure → correction)
+    float calculateStep(int& pressureIterations);       // Perform ONE SIMPLE iteration (momentum → pressure → correction)
 
     // =========================================================================
     // SOLVER SUBCOMPONENTS (implemented in Utilities/*.cpp)
     // =========================================================================
     
-    bool solvePressureSystem(int& pressureIterations, double& localResidMass);  // Pressure correction solve
-    void updateCflRamp(double currRes);                 // Update pseudo-CFL based on current residual
+    bool solvePressureSystem(int& pressureIterations, float& localResidMass);  // Pressure correction solve
+    void updateCflRamp(float currRes);                 // Update pseudo-CFL based on current residual
+
+    void updateCflSER(float currentResidL2, int iteration);  // Switched Evolution Relaxation (Mulder & van Leer)
+    void applyLineSearch(float currentResidL2);        // Backtracking line search for robustness
 
     // =========================================================================
     // GEOMETRY LOADING
@@ -394,9 +476,13 @@ public:
     // BOUNDARY CONDITIONS
     // =========================================================================
     
-    void setVelocityBoundaryConditions(Eigen::MatrixXd& uIn, Eigen::MatrixXd& vIn);  // Apply inlet/outlet/wall BCs
-    void setPressureBoundaryConditions(Eigen::MatrixXd& pIn);                         // Apply pressure BCs (outlet = 0)
-    double checkBoundaries(int i, int j);               // Returns 1.0 if (i,j) is at domain boundary, 0.0 otherwise
+    void setVelocityBoundaryConditions(Eigen::MatrixXf& uIn, Eigen::MatrixXf& vIn);  // Apply inlet/outlet/wall BCs
+    void setPressureBoundaryConditions(Eigen::MatrixXf& pIn);                         // Apply pressure BCs (outlet = 0)
+    // Inlined for performance - called ~4M times per iteration
+    inline float checkBoundaries(int i, int j) const {
+        if (i <= 0 || i >= M || j <= 0 || j >= N) return 1.0f;
+        return 0.0f;
+    }
     void paintBoundaries();                             // Debug: export boundary map to file
 
     // =========================================================================
@@ -404,28 +490,30 @@ public:
     // =========================================================================
     
     void saveAll();                                     // Save all fields (u, v, p, VTK) to ExportFiles/
-    void saveMatrix(Eigen::MatrixXd inputMatrix, std::string fileName);  // Save single matrix to text file
+    void saveMatrix(Eigen::MatrixXf inputMatrix, std::string fileName);  // Save single matrix to text file
     void initLogFiles(std::ofstream& residFile, std::ofstream& dpFile);  // Create residual/pressure log files
     void printIterationHeader() const;                  // Print column headers to console
     void writeIterationLogs(std::ofstream& residFile,   // Write iteration data to log files
                             std::ofstream& dpFile,
                             int iter,
-                            double corePressureDrop,
-                            double fullPressureDrop,
-                            double coreStaticDrop,
-                            double fullStaticDrop);
+                            float corePressureDrop,
+                            float fullPressureDrop,
+                            float coreStaticDrop,
+                            float fullStaticDrop,
+                            float pseudoCFL);
     void printIterationRow(int iter,                    // Print one row of iteration data to console
-                           double residMassVal,
-                           double residUVal,
-                           double residVVal,
-                           double maxTransRes,
-                           double corePressureDrop,
-                           double fullPressureDrop,
-                           double iterTimeMs,
-                           int pressureIterations) const;
+                           float residMassVal,
+                           float residUVal,
+                           float residVVal,
+                           float maxTransRes,
+                           float corePressureDrop,
+                           float fullPressureDrop,
+                           float iterTimeMs,
+                           int pressureIterations,
+                           float pseudoCFL) const;
     void printStaticDp(int iter,                        // Print static pressure drop (debug)
-                       double coreStaticDrop,
-                       double fullStaticDrop) const;
+                       float coreStaticDrop,
+                       float fullStaticDrop) const;
 
 };
 
@@ -443,24 +531,6 @@ public:
 // Uses precomputed boolean masks stored as flat vectors for cache efficiency.
 // Returns true if the location should be solved, false if it's solid (skip).
 
-// Check if u-velocity at (i,j) is in fluid region
-// u-grid has size (M+1) x N, so linear index = i * N + j
-inline bool fluidU(const SIMPLE& s, int i, int j) {
-    return s.isFluidU[i * s.N + j];
-}
-
-// Check if v-velocity at (i,j) is in fluid region
-// v-grid has size M x (N+1), so linear index = i * (N+1) + j
-inline bool fluidV(const SIMPLE& s, int i, int j) {
-    return s.isFluidV[i * (s.N + 1) + j];
-}
-
-// Check if pressure at (i,j) is in fluid region
-// p-grid has size (M+1) x (N+1), so linear index = i * (N+1) + j
-inline bool fluidP(const SIMPLE& s, int i, int j) {
-    return s.isFluidP[i * (s.N + 1) + j];
-}
-
 // -----------------------------------------------------------------------------
 // Alpha (Brinkman Penalization) Interpolation
 // -----------------------------------------------------------------------------
@@ -473,7 +543,7 @@ inline bool fluidP(const SIMPLE& s, int i, int j) {
 
 // Get Brinkman alpha at U-velocity location (i,j)
 // Returns the average of alpha from the two cells sharing this u-face
-inline double alphaAtU(const SIMPLE& s, int i, int j) {
+inline float alphaAtU(const SIMPLE& s, int i, int j) {
     const auto& alpha = s.alpha;
     const int M = s.M;
     const int N = s.N;
@@ -487,17 +557,17 @@ inline double alphaAtU(const SIMPLE& s, int i, int j) {
     int cj2 = j;         // Right cell column
     
     // Additional bounds checks (defensive programming)
-    if (ci < 0 || ci >= alpha.rows()) return 0.0;
-    if (cj1 < 0 || cj1 >= alpha.cols()) return 0.0;
+    if (ci < 0 || ci >= alpha.rows()) return 0.0f;
+    if (cj1 < 0 || cj1 >= alpha.cols()) return 0.0f;
     if (cj2 < 0 || cj2 >= alpha.cols()) return alpha(ci, cj1);
     
     // Return arithmetic average of left and right cell alphas
-    return 0.5 * (alpha(ci, cj1) + alpha(ci, cj2));
+    return 0.5f * (alpha(ci, cj1) + alpha(ci, cj2));
 }
 
 // Get Brinkman alpha at V-velocity location (i,j)
 // Returns the average of alpha from the two cells sharing this v-face
-inline double alphaAtV(const SIMPLE& s, int i, int j) {
+inline float alphaAtV(const SIMPLE& s, int i, int j) {
     const auto& alpha = s.alpha;
     const int M = s.M;
     const int N = s.N;
@@ -511,12 +581,12 @@ inline double alphaAtV(const SIMPLE& s, int i, int j) {
     int cj = j - 1;      // Column index
     
     // Additional bounds checks
-    if (cj < 0 || cj >= alpha.cols()) return 0.0;
-    if (ci1 < 0 || ci1 >= alpha.rows()) return 0.0;
+    if (cj < 0 || cj >= alpha.cols()) return 0.0f;
+    if (ci1 < 0 || ci1 >= alpha.rows()) return 0.0f;
     if (ci2 < 0 || ci2 >= alpha.rows()) return alpha(ci1, cj);
     
     // Return arithmetic average of top and bottom cell alphas
-    return 0.5 * (alpha(ci1, cj) + alpha(ci2, cj));
+    return 0.5f * (alpha(ci1, cj) + alpha(ci2, cj));
 }
 
 // -----------------------------------------------------------------------------
@@ -531,7 +601,7 @@ inline double alphaAtV(const SIMPLE& s, int i, int j) {
 // Get porosity gamma at U-velocity location (i,j)
 // Returns the average of gamma from the two cells sharing this u-face
 // Default to 1.0 (fluid) at boundaries for stability
-inline double gammaAtU(const SIMPLE& s, int i, int j) {
+inline float gammaAtU(const SIMPLE& s, int i, int j) {
     const auto& gamma = s.gamma;
     const int M = s.M;
     const int N = s.N;
@@ -543,16 +613,16 @@ inline double gammaAtU(const SIMPLE& s, int i, int j) {
     int cj1 = j - 1;
     int cj2 = j;
     
-    if (ci < 0 || ci >= gamma.rows()) return 1.0;
-    if (cj1 < 0 || cj1 >= gamma.cols()) return 1.0;
+    if (ci < 0 || ci >= gamma.rows()) return 1.0f;
+    if (cj1 < 0 || cj1 >= gamma.cols()) return 1.0f;
     if (cj2 < 0 || cj2 >= gamma.cols()) return gamma(ci, cj1);
     
-    return 0.5 * (gamma(ci, cj1) + gamma(ci, cj2));
+    return 0.5f * (gamma(ci, cj1) + gamma(ci, cj2));
 }
 
 // Get porosity gamma at V-velocity location (i,j)
 // Returns the average of gamma from the two cells sharing this v-face
-inline double gammaAtV(const SIMPLE& s, int i, int j) {
+inline float gammaAtV(const SIMPLE& s, int i, int j) {
     const auto& gamma = s.gamma;
     const int M = s.M;
     const int N = s.N;
@@ -564,11 +634,11 @@ inline double gammaAtV(const SIMPLE& s, int i, int j) {
     int ci2 = i;
     int cj = j - 1;
     
-    if (cj < 0 || cj >= gamma.cols()) return 1.0;
-    if (ci1 < 0 || ci1 >= gamma.rows()) return 1.0;
+    if (cj < 0 || cj >= gamma.cols()) return 1.0f;
+    if (ci1 < 0 || ci1 >= gamma.rows()) return 1.0f;
     if (ci2 < 0 || ci2 >= gamma.rows()) return gamma(ci1, cj);
     
-    return 0.5 * (gamma(ci1, cj) + gamma(ci2, cj));
+    return 0.5f * (gamma(ci1, cj) + gamma(ci2, cj));
 }
 
 // -----------------------------------------------------------------------------
@@ -581,12 +651,12 @@ inline double gammaAtV(const SIMPLE& s, int i, int j) {
 
 // Compute SOU deferred correction for U-momentum at location (i,j)
 // Fe, Fw, Fn, Fs are the mass flux rates at east/west/north/south faces
-double computeSOUCorrectionU(const SIMPLE& s, int i, int j,
-                             double Fe, double Fw, double Fn, double Fs);
+float computeSOUCorrectionU(const SIMPLE& s, int i, int j,
+                             float Fe, float Fw, float Fn, float Fs);
 
 // Compute SOU deferred correction for V-momentum at location (i,j)
-double computeSOUCorrectionV(const SIMPLE& s, int i, int j,
-                             double Fe, double Fw, double Fn, double Fs);
+float computeSOUCorrectionV(const SIMPLE& s, int i, int j,
+                             float Fe, float Fw, float Fn, float Fs);
 
 // -----------------------------------------------------------------------------
 // Pseudo-Time Statistics Logging
@@ -607,19 +677,33 @@ void logPseudoStats(const SIMPLE& solver, const char* label, const SIMPLE::Pseud
 
 // Structure to hold metrics sampled at a single vertical plane (constant x)
 struct PlaneMetrics {
-    double flowArea   = 0.0;  // Total open (fluid) cross-sectional area [m²/m depth]
-    double massFlux   = 0.0;  // Total mass flow rate through plane [kg/s per m depth]
-    double avgStatic  = 0.0;  // Area-weighted average STATIC pressure [Pa]
-    double avgDynamic = 0.0;  // Area-weighted average DYNAMIC pressure [Pa] = ½ρV²
-    double avgTotal   = 0.0;  // Mass-weighted average TOTAL pressure [Pa] = static + dynamic
+    float flowArea   = 0.0f;  // Total open (fluid) cross-sectional area [m²/m depth]
+    float massFlux   = 0.0f;  // Sum of |mass flow| through plane [kg/s per m depth]
+    float avgStatic  = 0.0f;  // Area-weighted average STATIC pressure [Pa]
+    float avgDynamic = 0.0f;  // Area-weighted average DYNAMIC pressure [Pa] = ½ρV²
+    float avgTotal   = 0.0f;  // Mass-flow-weighted TOTAL pressure [Pa] = static + dynamic
     bool   valid      = false;// True if at least one fluid cell was found at this x
 };
 
 // Sample pressure and velocity fields at a given physical x-coordinate [m]
 // Uses linear interpolation between adjacent cell columns.
-// Skips rows where either adjacent cell is solid (conservative for accuracy).
-PlaneMetrics samplePlaneAtX(const SIMPLE& solver, double xPhysical);
+// Skips rows unless both adjacent cells are pure fluid (gamma ~= 1).
+PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical);
 
 // Debug helper: print detailed plane metrics to console
-void printPlaneInfo(const char* name, double xPhysical, const PlaneMetrics& m);
+void printPlaneInfo(const char* name, float xPhysical, const PlaneMetrics& m);
 
+// =============================================================================
+// MOMENTUM SOLVER: Implicit AMG (STAR-CCM+ Style)
+// =============================================================================
+// These functions implement the implicit momentum solve using AMG with
+// Gauss-Seidel relaxation, matching STAR-CCM+ methodology.
+// Implemented in Utilities/momentum_solver.cpp.
+
+// Solve U-momentum equation implicitly using AMG
+// Returns: number of AMG iterations, updates solver.uStar in place
+int solveUMomentumImplicit(SIMPLE& solver, float& residU);
+
+// Solve V-momentum equation implicitly using AMG
+// Returns: number of AMG iterations, updates solver.vStar in place
+int solveVMomentumImplicit(SIMPLE& solver, float& residV);
