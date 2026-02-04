@@ -1,6 +1,7 @@
 // ============================================================================
 // File: ThermalSolver/thermal_solver.cpp
 // Author: Peter Tcherkezian
+// Edited by: Carlos Goni
 // ============================================================================
 // Description:
 //   3D Conjugate Heat Transfer (CHT) solver using Finite Volume Method (FVM)
@@ -757,6 +758,9 @@ int main(int argc, char* argv[]) {
      // Export thermal conductivity field for MMA optimizer
      print_k_statistics(s.gamma, p);
      save_k_field(s.gamma, p, dir);
+     
+     // Export bottom surface temperature (contact with Si die/TIM)
+     save_bottom_temperature(s.T, p, dir);
      
      // Compute and export gradient field for visualization
      GradientField grad_field = compute_gradient_field(s.T, s.dz_cells, p);

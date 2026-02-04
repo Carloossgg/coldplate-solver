@@ -610,3 +610,41 @@ void print_k_statistics(const vector<double>& gamma, const Params& p) {
     cout << "  Cells: " << count_fluid << " fluid, " << count_solid << " solid, " << count_buffer << " buffer" << endl;
     cout << "  RAMP parameter q_k = " << qk << endl;
 }
+
+// ============================================================================
+// Save Bottom Surface Temperature Field
+// ============================================================================
+// Exports temperature at the bottom of the substrate (k=0, z=0).
+// This is the surface in contact with the Si die / TIM.
+// Format: Ny rows x Nx cols, tab-separated, matching geometry_thermal.txt layout.
+// ============================================================================
+void save_bottom_temperature(
+    const vector<double>& T,
+    const Params& p,
+    const string& dir
+) {
+    string filepath = dir + "/T_bottom.txt";
+    ofstream f(filepath);
+    
+    if (!f) {
+        cerr << "Warning: Could not open " << filepath << " for writing" << endl;
+        return;
+    }
+    
+    int Nx = p.Nx, Ny = p.Ny;
+    int k = 0;  // Bottom surface (z = 0)
+    
+    f << fixed << setprecision(4);
+    
+    for (int j = 0; j < Ny; j++) {
+        for (int i = 0; i < Nx; i++) {
+            int P = k * Nx * Ny + j * Nx + i;
+            f << T[P];
+            if (i < Nx - 1) f << "\t";
+        }
+        f << "\n";
+    }
+    
+    f.close();
+    cout << "Saved: " << filepath << endl;
+}
