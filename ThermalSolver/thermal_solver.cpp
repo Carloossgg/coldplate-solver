@@ -754,6 +754,14 @@ int main(int argc, char* argv[]) {
      print_thermal_metrics(metrics);
      save_thermal_metrics(metrics, dir);
      
+     // Export thermal conductivity field for MMA optimizer
+     print_k_statistics(s.gamma, p);
+     save_k_field(s.gamma, p, dir);
+     
+     // Compute and export gradient field for visualization
+     GradientField grad_field = compute_gradient_field(s.T, s.dz_cells, p);
+     save_gradient_vtk(grad_field, s.dz_cells, p, dir + "/thermal_gradient_3d.vtk");
+     
      return 0;
  }
  
