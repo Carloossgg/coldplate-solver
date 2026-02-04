@@ -189,6 +189,9 @@ struct Params {
     int Nz() const { return nz_solid + nz_fluid; }
     int n_dofs() const { return Nx * Ny * Nz(); }
 };
+
+// Include thermal output module (needs Params definition above)
+#include "thermal_output.cpp"
  
 // ============================================================================
 // Optimization Results Structure
@@ -745,6 +748,12 @@ int main(int argc, char* argv[]) {
      
      s.solve();
      s.save_vtk(dir + "/thermal_results_3d.vtk");
+     
+     // Compute and export thermal metrics
+     ThermalMetrics metrics = compute_thermal_metrics(s.T, s.gamma, s.dz_cells, p);
+     print_thermal_metrics(metrics);
+     save_thermal_metrics(metrics, dir);
+     
      return 0;
  }
  
