@@ -103,6 +103,22 @@ float SIMPLE::calculateStep(int& pressureIterations)
     // Moved here so it's available for both implicit and explicit paths
     const float maxVel = 3.0f * std::max(std::abs(inletVelocity), 0.1f);
 
+    // Keep BCs explicitly synchronized before assembling momentum equations.
+    // This also enables robust runtime detection of external no-slip walls.
+    setVelocityBoundaryConditions(u, v);
+    setPressureBoundaryConditions(p);
+    const ExternalWallFlags externalWalls = detectExternalNoSlipWalls(*this);
+    static bool printedHalfCellActivation = false;
+    if (!printedHalfCellActivation) {
+        std::cout << "Half-cell diffusion activation:"
+                  << " bottom=" << (externalWalls.bottom ? "ON" : "OFF")
+                  << " top=" << (externalWalls.top ? "ON" : "OFF")
+                  << " left=" << (externalWalls.left ? "ON" : "OFF")
+                  << " right=" << (externalWalls.right ? "ON" : "OFF")
+                  << std::endl;
+        printedHalfCellActivation = true;
+    }
+
     // =========================================================================
     // MOMENTUM SOLVER: Select Implicit (AMG) or Explicit (Point Gauss-Seidel)
     // =========================================================================
@@ -227,11 +243,9 @@ float SIMPLE::calculateStep(int& pressureIterations)
     // -------------------------------------------------------------------------
     const bool useSOU = (convectionScheme == 1);  // Second-order upwind?
     
-    // 2.5D model: scale convection by 6/7 (accounts for parabolic profile)
-    // Now controlled independently via enableConvectionScaling flag
-    // 2.5D model: scale convection by 6/7 (accounts for parabolic profile)
-    // Now controlled independently via enableConvectionScaling flag
-    const float convScale = enableConvectionScaling ? (6.0f / 7.0f) : 1.0f;
+    // 2.5D model: scale convection by 6/7 (accounts for parabolic profile).
+    // Master switch behavior: when 2.5D is OFF, convection scaling is OFF.
+    const float convScale = (enableTwoPointFiveD && enableConvectionScaling) ? (6.0f / 7.0f) : 1.0f;
     
     // 2.5D sink coefficient: -(5μ/2Ht²) * multiplier for parallel-plate friction
     // Base is (5/2)μ/Ht²; multiplier ≈4.8 gives 12μ/Ht² (Poiseuille friction)
@@ -283,6 +297,15 @@ float SIMPLE::calculateStep(int& pressureIterations)
             float aW = De + std::max(0.0f, Fw);
             float aN = Dn + std::max(0.0f, -Fn);
             float aS = Dn + std::max(0.0f, Fs);
+
+            // Half-cell wall diffusion for tangential velocity at external
+            // horizontal no-slip walls (u-momentum).
+            if (externalWalls.bottom && (i - 1 == 0)) {
+                aS += Dn;
+            }
+            if (externalWalls.top && (i + 1 == M)) {
+                aN += Dn;
+            }
 
             float Sdc = useSOU ? computeSOUCorrectionU(*this, i, j, Fe, Fw, Fn, Fs) : 0.0f;
 
@@ -370,6 +393,15 @@ float SIMPLE::calculateStep(int& pressureIterations)
             float aW = De + std::max(0.0f, Fw);
             float aN = Dn + std::max(0.0f, -Fn);
             float aS = Dn + std::max(0.0f, Fs);
+
+            // Half-cell wall diffusion for tangential velocity at external
+            // vertical no-slip walls (v-momentum).
+            if (externalWalls.left && (j - 1 == 0)) {
+                aW += De;
+            }
+            if (externalWalls.right && (j + 1 == N)) {
+                aE += De;
+            }
 
             float Sdc = useSOU ? computeSOUCorrectionV(*this, i, j, Fe, Fw, Fn, Fs) : 0.0f;
 

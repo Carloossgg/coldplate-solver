@@ -189,6 +189,7 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
     const float sinkDiag = sinkCoeff * vol;
     const float hChar = std::min(hx, hy);
     const float De = eta * hy / hx, Dn = eta * hx / hy;
+    const ExternalWallFlags externalWalls = detectExternalNoSlipWalls(s);
     
     // Assembly
     {
@@ -217,7 +218,8 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
             }
             
             // Convective fluxes (Scaled by rom factor if applicable)
-            const float convScale = s.enableConvectionScaling ? (6.0f / 7.0f) : 1.0f;
+            // Master switch behavior: when 2.5D is OFF, convection scaling is OFF.
+            const float convScale = (s.enableTwoPointFiveD && s.enableConvectionScaling) ? (6.0f / 7.0f) : 1.0f;
             float Fe = convScale * rho * hy * ue, Fw = convScale * rho * hy * uw;
             float Fn = convScale * rho * hx * vn, Fs = convScale * rho * hx * vs;
             
@@ -226,6 +228,17 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
             float aW = De + std::max(0.0f, Fw);
             float aN = Dn + std::max(0.0f, -Fn);
             float aS = Dn + std::max(0.0f, Fs);
+
+            // Half-cell wall diffusion on external no-slip boundaries:
+            // - U-equation: horizontal walls (top/bottom) affect tangential u
+            // - V-equation: vertical walls (left/right) affect tangential v
+            if constexpr (IsU) {
+                if (externalWalls.bottom && (i - 1 == 0)) aS += Dn;
+                if (externalWalls.top && (i + 1 == s.M)) aN += Dn;
+            } else {
+                if (externalWalls.left && (j - 1 == 0)) aW += De;
+                if (externalWalls.right && (j + 1 == s.N)) aE += De;
+            }
             float sumA = aE + aW + aN + aS;
             
             // Pseudo-transient (fully disabled when enablePseudoTimeStepping=false)

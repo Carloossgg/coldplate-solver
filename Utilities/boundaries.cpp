@@ -38,6 +38,8 @@
 //
 // ============================================================================
 #include "SIMPLE.h"
+#include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // setVelocityBoundaryConditions: Apply velocity BCs to u and v fields
@@ -71,20 +73,30 @@ void SIMPLE::setVelocityBoundaryConditions(Eigen::MatrixXf& uIn,
         vIn(M - 1, j) = 0.0f;    // v on top faces
     }
 
-    // Left boundary (x = 0): set inlet velocity only on fluid-design cells
+    // Left boundary (x = 0): impose inlet velocity on the full fluid part of
+    // the inlet face, including inlet-wall corner faces when adjacent inlet
+    // cells are fluid. This matches a "uniform velocity inlet patch" treatment.
+    //
     // Use gamma (design field) rather than cellType so Brinkman wall forcing
     // and TO densities are handled consistently with momentum equations.
-    for (int i = 1; i < M; ++i) {
-        const int cellRow = i - 1;  // Corresponding row in gamma/alpha
-        if (cellRow >= 0 &&
-            cellRow < static_cast<int>(gamma.rows()) &&
-            gamma(cellRow, 0) > 0.5f) {
-            // Fluid part of inlet: impose uniform velocity.
-            uIn(i, 0) = Uin;
+    auto inletFluidFromURow = [&](int uRow) -> bool {
+        if (gamma.rows() == 0 || gamma.cols() == 0) return false;
+        // Map u-row to nearest physical cell row at inlet.
+        int cellRow;
+        if (uRow <= 0) {
+            cellRow = 0;  // Bottom inlet corner -> first physical row
+        } else if (uRow >= M) {
+            // Top inlet corner -> last physical row (M-2 with padded indexing)
+            cellRow = std::max(0, M - 2);
         } else {
-            // Solid/penalized part of inlet or out of bounds: no-slip.
-            uIn(i, 0) = 0.0f;
+            cellRow = uRow - 1;
         }
+        cellRow = std::max(0, std::min(cellRow, static_cast<int>(gamma.rows()) - 1));
+        return gamma(cellRow, 0) > 0.5f;
+    };
+
+    for (int i = 0; i <= M; ++i) {
+        uIn(i, 0) = inletFluidFromURow(i) ? Uin : 0.0f;
     }
 
     // v on left boundary: no normal flow (x-normal boundary, so v is tangential).
@@ -131,6 +143,67 @@ void SIMPLE::setPressureBoundaryConditions(Eigen::MatrixXf& pIn)
     for (int i = 1; i < M; ++i) {
         pIn(i, N) = 0.0;
     }
+}
+
+ExternalWallFlags detectExternalNoSlipWalls(const SIMPLE& s)
+{
+    ExternalWallFlags flags;
+    if (s.M < 2 || s.N < 2) return flags;
+
+    const float velTol = 1e-8f;
+    const float pGradTol = 1e-6f;
+    const float pPinTol = 1e-8f;
+
+    // Helper: iterate inclusive integer range [a, b].
+    auto allAbsBelowRange = [&](auto&& accessor, int a, int b, float tol) -> bool {
+        if (a > b) return true;
+        for (int k = a; k <= b; ++k) {
+            if (std::abs(accessor(k)) > tol) return false;
+        }
+        return true;
+    };
+
+    // Corner-aware checks:
+    // In this solver, inlet can overwrite u at (bottom-left, top-left) corners.
+    // For wall detection we ignore corner points and check the side interior.
+    const int uSideStart = 1;
+    const int uSideEnd = s.N - 2;
+    const bool uBottomZero = allAbsBelowRange([&](int j) { return s.u(0, j); }, uSideStart, uSideEnd, velTol);
+    const bool uTopZero = allAbsBelowRange([&](int j) { return s.u(s.M, j); }, uSideStart, uSideEnd, velTol);
+
+    const bool vBottomZero = allAbsBelowRange([&](int j) { return s.v(0, j); }, 0, s.N, velTol);
+    const bool vTopZero = allAbsBelowRange([&](int j) { return s.v(s.M - 1, j); }, 0, s.N, velTol);
+
+    bool pBottomNeumann = true;
+    bool pTopNeumann = true;
+    for (int j = 1; j < s.N; ++j) {
+        if (std::abs(s.p(0, j) - s.p(1, j)) > pGradTol) pBottomNeumann = false;
+        if (std::abs(s.p(s.M, j) - s.p(s.M - 1, j)) > pGradTol) pTopNeumann = false;
+    }
+    flags.bottom = uBottomZero && vBottomZero && pBottomNeumann;
+    flags.top = uTopZero && vTopZero && pTopNeumann;
+
+    // Left side (x=0): inlet usually makes this non-wall by nonzero u.
+    const bool uLeftZero = allAbsBelowRange([&](int i) { return s.u(i, 0); }, 1, s.M - 1, velTol);
+    const bool vLeftZero = allAbsBelowRange([&](int i) { return s.v(i, 0); }, 0, s.M - 1, velTol);
+    bool pLeftNeumann = true;
+    for (int i = 1; i < s.M; ++i) {
+        if (std::abs(s.p(i, 0) - s.p(i, 1)) > pGradTol) pLeftNeumann = false;
+    }
+    flags.left = uLeftZero && vLeftZero && pLeftNeumann;
+
+    // Right side (x=L): if pressure is pinned to zero, treat as outlet (not wall).
+    const bool uRightZero = allAbsBelowRange([&](int i) { return s.u(i, s.N - 1); }, 1, s.M - 1, velTol);
+    const bool vRightZero = allAbsBelowRange([&](int i) { return s.v(i, s.N); }, 0, s.M - 1, velTol);
+    bool pRightNeumann = true;
+    bool pRightPinnedZero = true;
+    for (int i = 1; i < s.M; ++i) {
+        if (std::abs(s.p(i, s.N) - s.p(i, s.N - 1)) > pGradTol) pRightNeumann = false;
+        if (std::abs(s.p(i, s.N)) > pPinTol) pRightPinnedZero = false;
+    }
+    flags.right = uRightZero && vRightZero && pRightNeumann && !pRightPinnedZero;
+
+    return flags;
 }
 
 // checkBoundaries is now inline in SIMPLE.h for performance

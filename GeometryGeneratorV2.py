@@ -38,7 +38,7 @@ inlet_plenum_fraction = max(0.0, min(1.0, 1.0 - inlet_channel_extension_frac))
 # =============================================================================
 # 2. MESH REFINEMENT SETTINGS
 # =============================================================================
-REFINEMENT_FACTOR = 4
+REFINEMENT_FACTOR = 8
 BASE_CELLS_PER_CHANNEL = 5  # base cells per nominal width (used to set dx)
 
 # Use a nominal width to set dx; actual widths are quantized to integer cells.
@@ -49,9 +49,9 @@ dx = w_nominal / target_cells_channel
 dy = dx
 
 # Ensure minimum interior solid width is at least 3.5 cells to prevent singularities
-min_solid_interior = max(MIN_FEATURE_SIZE, 3.5 * dx)
+min_solid_interior = max(MIN_FEATURE_SIZE, 6 * dx)
 # Ensure minimum channel width is at least 3.5 cells
-w_channel_min = max(0.0005, 3.5 * dx)
+w_channel_min = max(0.0005, 6 * dx)
 w_channel_max = max(0.0007, w_channel_min + 0.0002)
 
 print("-" * 60)

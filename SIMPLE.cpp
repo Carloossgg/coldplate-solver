@@ -36,10 +36,22 @@ void SIMPLE::loadParameters(const std::string& fileName) {
         exit(1);
     }
 
-    if (!(in >> M >> N >> hy >> hx >> targetVel >> N_in_buffer >> N_out_buffer)) {
+    int MFromFile = 0;
+    int NFromFile = 0;
+    if (!(in >> MFromFile >> NFromFile >> hy >> hx >> targetVel >> N_in_buffer >> N_out_buffer)) {
         std::cerr << "Error: Invalid parameter file format." << std::endl;
         exit(1);
     }
+    if (MFromFile <= 0 || NFromFile <= 0 || hy <= 0.0f || hx <= 0.0f) {
+        std::cerr << "Error: Non-positive grid size or spacing in " << fileName << std::endl;
+        exit(1);
+    }
+    // Structural indexing alignment:
+    // - File stores PHYSICAL cell counts (Ny, Nx)
+    // - Solver uses internal padded counts so interior loops i=1..M-1, j=1..N-1
+    //   cover exactly Ny x Nx physical cells.
+    M = MFromFile + 1;
+    N = NFromFile + 1;
     // Optional out-of-plane height for 2.5D model
     float htFromFile = 0.0f;
     if (in >> htFromFile) {
@@ -52,11 +64,12 @@ void SIMPLE::loadParameters(const std::string& fileName) {
                   << "; using SIMPLE.h defaults (rho=" << rho
                   << ", eta=" << eta << ")." << std::endl;
     }
-    if (enableTwoPointFiveD) {
-        if (Ht_channel <= 0.0) {
-            std::cerr << "Warning: Ht_channel not provided or <=0; falling back to hy (" << hy << " m)." << std::endl;
-            Ht_channel = hy;
-        }
+    if (enableTwoPointFiveD && Ht_channel <= 0.0f) {
+        // Do not fall back to hy: that creates an unphysically strong 2.5D sink
+        // for pure-2D cases (e.g. V5 with Ht=0), which can inflate pressure drop.
+        std::cerr << "Warning: 2.5D requested but Ht_channel <= 0 in " << fileName
+                  << ". Disabling 2.5D sink for this run." << std::endl;
+        enableTwoPointFiveD = false;
     }
     
     // Compute Brinkman alpha_max from MATERIAL permeability:
@@ -65,7 +78,9 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     float K_min = std::max(brinkmanKMin, 1e-20f);
     brinkmanAlphaMax = eta / K_min;
 
-    float domainLength = N * hx;
+    const int nCellsX = N - 1;
+    const int nCellsY = M - 1;
+    float domainLength = nCellsX * hx;
     float velRef = std::max(targetVel, 1e-6f);
     timeStep = timeStepMultiplier * domainLength / velRef;
     
@@ -82,7 +97,7 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     }
     
     // Calculate Reynolds number
-    float L_char = M * hx;
+    float L_char = nCellsY * hx;
     float Re = rho * targetVel * L_char / eta;
 
     // Set OpenMP threads
@@ -92,10 +107,31 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     std::cout << "   SIMPLE CFD Solver - Laminar Flow        " << std::endl;
     std::cout << "============================================" << std::endl;
     std::cout << "Algorithm: SIMPLE" << std::endl;
-    if (enableTwoPointFiveD) {
-        std::cout << "2.5D mode: ON (Ht = " << Ht_channel*1000.0 << " mm)" << std::endl;
+    // Real runtime check (what is actually active in momentum equations):
+    // - sink term active only if master switch is ON and Ht_channel > 0
+    // - convection scaling active only if master switch is ON and scaling switch is ON
+    const bool sinkActive = (enableTwoPointFiveD && Ht_channel > 0.0f);
+    const bool convScaleActive = (enableTwoPointFiveD && enableConvectionScaling);
+    const float sinkCoeffRuntime = sinkActive
+        ? twoPointFiveDSinkMultiplier * (5.0f * eta / (2.0f * Ht_channel * Ht_channel))
+        : 0.0f;
+    const float convScaleRuntime = convScaleActive ? (6.0f / 7.0f) : 1.0f;
+
+    std::cout << "2.5D runtime status:" << std::endl;
+    if (sinkActive || convScaleActive) {
+        std::cout << "  WARNING: ACTIVE" << std::endl;
     } else {
-        std::cout << "2.5D mode: OFF" << std::endl;
+        std::cout << "  OFF (no 2.5D terms active in solver equations)" << std::endl;
+    }
+    std::cout << "  Sink term: " << (sinkActive ? "ON" : "OFF")
+              << " | coeff=" << std::scientific << sinkCoeffRuntime << std::defaultfloat
+              << " [1/s]" << std::endl;
+    std::cout << "  Convection scaling: " << (convScaleActive ? "ON" : "OFF")
+              << " | factor=" << convScaleRuntime << std::endl;
+    if (enableTwoPointFiveD && Ht_channel > 0.0f) {
+        std::cout << "  Ht used by solver: " << Ht_channel * 1000.0f << " mm" << std::endl;
+    } else {
+        std::cout << "  Ht used by solver: n/a" << std::endl;
     }
     std::cout << "Density-based TO: ON (K_min=" << std::scientific << K_min
               << " m^2, alpha_max=" << brinkmanAlphaMax << ")" << std::defaultfloat << std::endl;
@@ -151,9 +187,11 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     std::cout << std::endl;
     
     std::cout << "OpenMP Threads: " << numThreads << std::endl;
-    std::cout << "Grid: " << M << " x " << N << " (" << M * N << " cells)" << std::endl;
+    std::cout << "Grid (physical cells): " << nCellsY << " x " << nCellsX
+              << " (" << nCellsY * nCellsX << " cells)" << std::endl;
+    std::cout << "Grid (internal padded): " << M << " x " << N << std::endl;
     std::cout << "Cell: " << hx * 1000 << " x " << hy * 1000 << " mm" << std::endl;
-    std::cout << "Domain: " << N * hx * 1000 << " x " << M * hy * 1000 << " mm" << std::endl;
+    std::cout << "Domain: " << nCellsX * hx * 1000 << " x " << nCellsY * hy * 1000 << " mm" << std::endl;
     std::cout << "Inlet: " << targetVel << " m/s" << std::endl;
     std::cout << "Re: " << std::fixed << std::setprecision(0) << Re << std::endl;
     std::cout << "Pseudo dt: " << std::scientific << timeStep << " s (manual)" << std::endl;
@@ -246,7 +284,7 @@ void SIMPLE::runIterations() {
     // Physical location-based pressure sampling planes
     // ============================================================
     // Domain physical dimensions
-    const float domainXMax = N * hx;  // Total domain length in meters
+    const float domainXMax = (N - 1) * hx;  // Total physical domain length in meters
     
     // Core planes: user-configurable physical x-coordinates
     const float xCoreIn  = xPlaneCoreInlet;
@@ -263,7 +301,7 @@ void SIMPLE::runIterations() {
     std::cout << "  Full inlet:   x = " << xFullIn * 1000.0 << " mm (domain start)" << std::endl;
     std::cout << "  Full outlet:  x = " << xFullOut * 1000.0 << " mm (domain end)" << std::endl;
     std::cout << "  -> Core dP = user-defined core region" << std::endl;
-    std::cout << "  -> Full dP = entire domain (inlet to outlet)" << std::endl;
+    std::cout << "  -> Full dP = strict inlet/outlet boundary-face integral" << std::endl;
     std::cout << std::defaultfloat;
     
     // Pressure drop convergence tracking (circular buffer for window)
@@ -340,8 +378,9 @@ void SIMPLE::runIterations() {
             ScopedTimer t("Outer: Monitoring & Sampling");
             inletCoreMetrics  = samplePlaneAtX(*this, xCoreIn);
             outletCoreMetrics = samplePlaneAtX(*this, xCoreOut);
-            inletFullMetrics  = samplePlaneAtX(*this, xFullIn);
-            outletFullMetrics = samplePlaneAtX(*this, xFullOut);
+            // Full-system report uses strict boundary-face integration (industry style).
+            inletFullMetrics  = sampleBoundaryPatch(*this, true);
+            outletFullMetrics = sampleBoundaryPatch(*this, false);
         }
         
         // Calculate pressure drops (using total pressure: static + dynamic)
@@ -448,13 +487,23 @@ void SIMPLE::runIterations() {
     // ============================================================
     PlaneMetrics coreInletFinal  = samplePlaneAtX(*this, xCoreIn);
     PlaneMetrics coreOutletFinal = samplePlaneAtX(*this, xCoreOut);
-    PlaneMetrics fullInletFinal  = samplePlaneAtX(*this, xFullIn);
-    PlaneMetrics fullOutletFinal = samplePlaneAtX(*this, xFullOut);
+    PlaneMetrics fullInletFinal  = sampleBoundaryPatch(*this, true);
+    PlaneMetrics fullOutletFinal = sampleBoundaryPatch(*this, false);
     
     float coreStaticDrop = coreInletFinal.avgStatic - coreOutletFinal.avgStatic;
     float coreTotalDrop = coreInletFinal.avgTotal - coreOutletFinal.avgTotal;
     float fullStaticDrop = fullInletFinal.avgStatic - fullOutletFinal.avgStatic;
     float fullTotalDrop = fullInletFinal.avgTotal - fullOutletFinal.avgTotal;
+    const float depthFor3D = (Ht_channel > 0.0f) ? Ht_channel : 1.0f;
+    const bool hasPhysicalDepth = (Ht_channel > 0.0f);
+    const float coreMdotIn2D = coreInletFinal.massFlux;
+    const float coreMdotOut2D = coreOutletFinal.massFlux;
+    const float fullMdotIn2D = fullInletFinal.massFlux;
+    const float fullMdotOut2D = fullOutletFinal.massFlux;
+    const float coreMdotIn3D = coreMdotIn2D * depthFor3D;
+    const float coreMdotOut3D = coreMdotOut2D * depthFor3D;
+    const float fullMdotIn3D = fullMdotIn2D * depthFor3D;
+    const float fullMdotOut3D = fullMdotOut2D * depthFor3D;
 
     // Calculate total simulation time
     auto simEnd = std::chrono::high_resolution_clock::now();
@@ -489,6 +538,16 @@ void SIMPLE::runIterations() {
               << coreOutletFinal.avgDynamic << " Pa" << std::endl;
     std::cout << "  Total (mass-flow-avg, in/out): " << coreInletFinal.avgTotal << " Pa | "
               << coreOutletFinal.avgTotal << " Pa" << std::endl;
+    std::cout << "  Mass flow (2D, in/out): " << std::scientific << coreMdotIn2D
+              << " | " << coreMdotOut2D << " kg/s per m depth" << std::defaultfloat << std::endl;
+    std::cout << "  Mass flow (3D, in/out): " << std::scientific << coreMdotIn3D
+              << " | " << coreMdotOut3D << " kg/s";
+    if (hasPhysicalDepth) {
+        std::cout << "  (using Ht=" << std::defaultfloat << Ht_channel << " m)";
+    } else {
+        std::cout << "  (Ht<=0, using unit depth 1 m)";
+    }
+    std::cout << std::defaultfloat << std::endl;
     std::cout << "  TOTAL dP (core):  " << coreTotalDrop << " Pa (" 
               << coreTotalDrop/1000.0 << " kPa)" << std::endl;
     std::cout << std::endl;
@@ -502,6 +561,16 @@ void SIMPLE::runIterations() {
               << fullOutletFinal.avgDynamic << " Pa" << std::endl;
     std::cout << "  Total (mass-flow-avg, in/out): " << fullInletFinal.avgTotal << " Pa | "
               << fullOutletFinal.avgTotal << " Pa" << std::endl;
+    std::cout << "  Mass flow (2D, in/out): " << std::scientific << fullMdotIn2D
+              << " | " << fullMdotOut2D << " kg/s per m depth" << std::defaultfloat << std::endl;
+    std::cout << "  Mass flow (3D, in/out): " << std::scientific << fullMdotIn3D
+              << " | " << fullMdotOut3D << " kg/s";
+    if (hasPhysicalDepth) {
+        std::cout << "  (using Ht=" << std::defaultfloat << Ht_channel << " m)";
+    } else {
+        std::cout << "  (Ht<=0, using unit depth 1 m)";
+    }
+    std::cout << std::defaultfloat << std::endl;
     std::cout << "  TOTAL dP (full):  " << fullTotalDrop << " Pa (" 
               << fullTotalDrop/1000.0 << " kPa)" << std::endl;
     std::cout << "Results saved to ExportFiles/" << std::endl;
@@ -516,30 +585,53 @@ void SIMPLE::runIterations() {
 // ------------------------------------------------------------------
 void SIMPLE::loadTopology(const std::string& fileName) {
     std::ifstream in(fileName);
+    const int physRows = M - 1;
+    const int physCols = N - 1;
+
+    // Default all to fluid (including padded row/col).
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            cellType(i, j) = 0.0f;
+        }
+    }
+
     if (!in) {
         std::cerr << "Warning: Could not open topology file '"
                   << fileName << "'. Assuming all fluid." << std::endl;
-        // Default all to fluid
-        for (int i = 0; i < M; ++i) {
-            for (int j = 0; j < N; ++j) {
-                cellType(i, j) = 0;  // 0 = fluid
-            }
-        }
         return;
     }
 
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
+    // Read physical geometry cells from file into internal [0..M-2]x[0..N-2].
+    bool readIncomplete = false;
+    for (int i = 0; i < physRows && !readIncomplete; ++i) {
+        for (int j = 0; j < physCols; ++j) {
             float val;
-            if (!(in >> val)) return;
+            if (!(in >> val)) {
+                readIncomplete = true;
+                break;
+            }
             cellType(i, j) = val;  // 0=fluid, 1=solid (supports both int and float input)
         }
     }
-    
+    if (readIncomplete) {
+        std::cerr << "Warning: Topology file ended early. Missing entries default to fluid." << std::endl;
+    }
+
+    // Pad the extra internal row/column by copying last physical row/col.
+    if (physRows > 0 && physCols > 0) {
+        for (int i = 0; i < physRows; ++i) {
+            cellType(i, physCols) = cellType(i, physCols - 1);
+        }
+        for (int j = 0; j < N; ++j) {
+            const int srcCol = std::min(j, physCols - 1);
+            cellType(physRows, j) = cellType(physRows - 1, srcCol);
+        }
+    }
+
     // Count fluid/solid/buffer cells
     int fluidCells = 0, solidCells = 0, bufferCells = 0;
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
+    for (int i = 0; i < physRows; ++i) {
+        for (int j = 0; j < physCols; ++j) {
             float v = cellType(i, j);
             if (v < 0.01f) fluidCells++;       // 0 = fluid
             else if (v > 0.99f) solidCells++;  // 1 = solid
@@ -561,19 +653,38 @@ void SIMPLE::loadDensityField() {
     
     // cellType is already loaded from geometry_fluid.txt by loadTopology()
     // Just convert cellType values to gamma
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
+    const int physRows = M - 1;
+    const int physCols = N - 1;
+
+    int clippedCount = 0;
+    for (int i = 0; i < physRows; ++i) {
+        for (int j = 0; j < physCols; ++j) {
             float val = cellType(i, j);
-            // If binary (0 or 1): invert to gamma convention
-            // If continuous (0.0-1.0): invert to gamma convention
-            gamma(i, j) = 1.0f - val;  // cellType 0 (fluid) -> gamma 1.0, cellType 1 (solid) -> gamma 0.0
+            // Support continuous densities robustly: clamp input to [0,1]
+            // then invert to gamma convention.
+            float valClamped = std::max(0.0f, std::min(1.0f, val));
+            if (std::abs(valClamped - val) > 1e-12f) {
+                clippedCount++;
+            }
+            gamma(i, j) = 1.0f - valClamped;  // cellType 0->gamma 1 (fluid), 1->0 (solid)
+        }
+    }
+
+    // Pad gamma on extra internal row/column to preserve interpolation consistency.
+    if (physRows > 0 && physCols > 0) {
+        for (int i = 0; i < physRows; ++i) {
+            gamma(i, physCols) = gamma(i, physCols - 1);
+        }
+        for (int j = 0; j < N; ++j) {
+            const int srcCol = std::min(j, physCols - 1);
+            gamma(physRows, j) = gamma(physRows - 1, srcCol);
         }
     }
     
     // Count density statistics
     int pureFluid = 0, pureSolid = 0, buffer = 0;
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
+    for (int i = 0; i < physRows; ++i) {
+        for (int j = 0; j < physCols; ++j) {
             if (gamma(i, j) > 0.99f) pureFluid++;
             else if (gamma(i, j) < 0.01f) pureSolid++;
             else buffer++;
@@ -581,6 +692,10 @@ void SIMPLE::loadDensityField() {
     }
     std::cout << "Geometry: " << pureFluid << " fluid, " << pureSolid 
               << " solid, " << buffer << " buffer cells" << std::endl;
+    if (clippedCount > 0) {
+        std::cout << "Warning: " << clippedCount
+                  << " geometry density values were outside [0,1] and were clamped." << std::endl;
+    }
 }
 
 // ------------------------------------------------------------------
@@ -609,23 +724,8 @@ void SIMPLE::buildAlphaFromDensity() {
         }
     }
     
-    // Keep Brinkman wall forcing symmetric with the active pressure/momentum rows.
-    // Active cell rows are 0..M-2 (mapped from pressure rows 1..M-1).
-    // Row M-1 is padding/unused in the momentum-pressure coupling, so do not
-    // force it solid (avoids a fake extra wall band in exports).
-    if (M >= 2) {
-        const int wallBottomRow = 0;
-        const int wallTopRow = M - 2;
-        for (int j = 0; j < N; ++j) {
-            alpha(wallBottomRow, j) = brinkmanAlphaMax;
-            alpha(wallTopRow, j) = brinkmanAlphaMax;
-            gamma(wallBottomRow, j) = 0.0f;
-            gamma(wallTopRow, j) = 0.0f;
-        }
-    }
-    
-    std::cout << "Brinkman alpha field built (RAMP, q=" << brinkmanQ 
-              << ", alpha_max=" << std::scientific << brinkmanAlphaMax 
+    std::cout << "Brinkman alpha field built (RAMP, q=" << brinkmanQ
+              << ", alpha_max=" << std::scientific << brinkmanAlphaMax
               << ")" << std::defaultfloat << std::endl;
 }
 

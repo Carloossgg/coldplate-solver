@@ -61,6 +61,12 @@ static float cellCenterX(int col, float hx) {
 // ============================================================================
 static void findBracketingColumns(float xPhysical, float hx, int N,
                                    int& colLeft, int& colRight, float& t) {
+    if (N <= 1) {
+        colLeft = 0;
+        colRight = 0;
+        t = 0.0f;
+        return;
+    }
     // Physical x of first cell center is 0.5*hx, last is (N-0.5)*hx
     float xMin = 0.5f * hx;
     float xMax = (N - 0.5f) * hx;
@@ -99,18 +105,20 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical) {
     
     const int M = solver.M;
     const int N = solver.N;
+    const int MCells = M - 1;
+    const int NCells = N - 1;
     const float hx = solver.hx;
     const float hy = solver.hy;
     const float rho = solver.rho;
     
     // Validate inputs
-    if (M <= 0 || N <= 0 || hx <= 0.0f || hy <= 0.0f) {
+    if (MCells <= 0 || NCells <= 0 || hx <= 0.0f || hy <= 0.0f) {
         return metrics;
     }
     
     // Domain bounds
     float domainXMin = 0.0f;
-    float domainXMax = N * hx;
+    float domainXMax = NCells * hx;
     
     // Check if xPhysical is outside domain and warn
     if (xPhysical < domainXMin || xPhysical > domainXMax) {
@@ -121,7 +129,7 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical) {
     // Find bracketing columns for interpolation
     int colLeft, colRight;
     float t;
-    findBracketingColumns(xPhysical, hx, N, colLeft, colRight, t);
+    findBracketingColumns(xPhysical, hx, NCells, colLeft, colRight, t);
     
     // Accumulators
     float staticAreaSum = 0.0f;
@@ -130,15 +138,16 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical) {
     float area = 0.0f;
     float fluxSum = 0.0f;
     
-    // Iterate over rows (interior pressure rows: 1 to M-1)
-    // Pressure grid is (M+1) x (N+1), cellType is M x N
+    // Iterate over rows (interior pressure rows: 1 to M-1).
+    // Pressure grid is (M+1) x (N+1), internal cellType is M x N with one padded
+    // row/col, so physical cells are (M-1) x (N-1).
     // Pressure p(i, j) corresponds to cellType(i-1, j-1)
     for (int i = 1; i < M; ++i) {
         const int cellRow = i - 1;  // Corresponding row in cellType
         
         // Bounds check
-        if (cellRow < 0 || cellRow >= M) continue;
-        if (colLeft < 0 || colLeft >= N || colRight < 0 || colRight >= N) continue;
+        if (cellRow < 0 || cellRow >= MCells) continue;
+        if (colLeft < 0 || colLeft >= NCells || colRight < 0 || colRight >= NCells) continue;
         
         // Include only pure-fluid rows for reporting:
         // both adjacent cells must have gamma ~= 1 (not solid/intermediate).
@@ -227,6 +236,93 @@ PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical) {
         metrics.avgTotal = metrics.avgStatic + metrics.avgDynamic;
     }
     
+    return metrics;
+}
+
+// ============================================================================
+// sampleBoundaryPatch: Strict boundary-face integral on inlet/outlet patches
+// ============================================================================
+PlaneMetrics sampleBoundaryPatch(const SIMPLE& solver, bool inletBoundary) {
+    PlaneMetrics metrics;
+
+    const int M = solver.M;
+    const int N = solver.N;
+    const int MCells = M - 1;
+    const int NCells = N - 1;
+    const float hy = solver.hy;
+    const float rho = solver.rho;
+
+    if (MCells <= 0 || NCells <= 0 || hy <= 0.0f) {
+        return metrics;
+    }
+
+    // Boundary face columns on staggered grids:
+    // - u faces: j=0 (inlet) or j=N-1 (outlet)
+    // - p ghosts: j=0 (inlet Neumann ghost) or j=N (outlet Dirichlet)
+    // - v faces: j=0 (inlet) or j=N (outlet)
+    const int uCol = inletBoundary ? 0 : (N - 1);
+    const int pCol = inletBoundary ? 0 : N;
+    const int vCol = inletBoundary ? 0 : N;
+    const int adjCellCol = inletBoundary ? 0 : (NCells - 1);
+
+    constexpr float pureFluidTol = 1e-6f;
+    float staticAreaSum = 0.0f;
+    float dynAreaSum = 0.0f;
+    float totalWeighted = 0.0f;
+    float area = 0.0f;
+    float fluxSum = 0.0f;
+
+    // Vertical boundary-face segments correspond to u rows i=1..M-1.
+    for (int i = 1; i < M; ++i) {
+        const int cellRow = i - 1;
+        if (cellRow < 0 || cellRow >= MCells) continue;
+        if (adjCellCol < 0 || adjCellCol >= NCells) continue;
+
+        // Report only pure-fluid boundary segments.
+        if (solver.gamma(cellRow, adjCellCol) < 1.0f - pureFluidTol) {
+            continue;
+        }
+
+        const float faceArea = hy; // Per-unit-depth 2D face area
+        area += faceArea;
+
+        const int pColClamped = std::max(0, std::min(pCol, static_cast<int>(solver.p.cols()) - 1));
+        const int uColClamped = std::max(0, std::min(uCol, static_cast<int>(solver.u.cols()) - 1));
+        const int vColClamped = std::max(0, std::min(vCol, static_cast<int>(solver.v.cols()) - 1));
+        const int vRowTop = std::max(0, std::min(i - 1, static_cast<int>(solver.v.rows()) - 1));
+        const int vRowBottom = std::max(0, std::min(i, static_cast<int>(solver.v.rows()) - 1));
+
+        const float staticP = solver.p(i, pColClamped);
+        const float uNormal = solver.u(i, uColClamped);
+        const float vTangential = 0.5f * (solver.v(vRowTop, vColClamped) + solver.v(vRowBottom, vColClamped));
+
+        const float velMag = std::sqrt(uNormal * uNormal + vTangential * vTangential);
+        const float dynP = 0.5f * rho * velMag * velMag;
+        const float totalPAbs = staticP + dynP;
+
+        staticAreaSum += staticP * faceArea;
+        dynAreaSum += dynP * faceArea;
+
+        const float fluxAbs = std::abs(rho * uNormal * faceArea);
+        if (fluxAbs > 0.0f) {
+            fluxSum += fluxAbs;
+            totalWeighted += totalPAbs * fluxAbs;
+        }
+    }
+
+    metrics.flowArea = area;
+    metrics.massFlux = fluxSum;
+    if (area > 0.0f) {
+        metrics.avgStatic = staticAreaSum / area;
+        metrics.avgDynamic = dynAreaSum / area;
+        metrics.valid = true;
+    }
+    if (fluxSum > 0.0f) {
+        metrics.avgTotal = totalWeighted / fluxSum;
+    } else if (area > 0.0f) {
+        metrics.avgTotal = metrics.avgStatic + metrics.avgDynamic;
+    }
+
     return metrics;
 }
 

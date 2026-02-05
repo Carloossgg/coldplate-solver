@@ -73,6 +73,8 @@ void SIMPLE::saveMatrix(Eigen::MatrixXf inputMatrix, std::string fileName)
 void SIMPLE::saveAll()
 {
     ScopedTimer t("Output: saveAll (Total)");
+    const int physRows = M - 1;
+    const int physCols = N - 1;
     
     // Optionally save raw staggered fields for restart
     {
@@ -84,23 +86,25 @@ void SIMPLE::saveAll()
 
     // 1. Build cell-aligned fields for export (Required for VTK & Thermal)
     // For topology optimization: compute values everywhere.
-    Eigen::MatrixXf uCenter = Eigen::MatrixXf::Zero(M, N);
-    Eigen::MatrixXf vCenter = Eigen::MatrixXf::Zero(M, N);
-    Eigen::MatrixXf pCenter = Eigen::MatrixXf::Zero(M, N);
+    Eigen::MatrixXf uCenter = Eigen::MatrixXf::Zero(physRows, physCols);
+    Eigen::MatrixXf vCenter = Eigen::MatrixXf::Zero(physRows, physCols);
+    Eigen::MatrixXf pCenter = Eigen::MatrixXf::Zero(physRows, physCols);
 
     {
         ScopedTimer t2("Output: Cell-Aligned Field Assembly");
-        for (int i = 0; i < M; ++i) {
-            for (int j = 0; j < N; ++j) {
-                // Velocity at cell center from adjacent staggered faces.
-                uCenter(i, j) = 0.5f * (u(i, j) + u(i + 1, j));
-                vCenter(i, j) = 0.5f * (v(i, j) + v(i, j + 1));
+        for (int i = 0; i < physRows; ++i) {
+            for (int j = 0; j < physCols; ++j) {
+                // Convert staggered velocities to cell centers using the correct
+                // face pair directions:
+                // - u is on vertical faces -> average WEST/EAST faces (vary j)
+                // - v is on horizontal faces -> average SOUTH/NORTH faces (vary i)
+                const int uRow = i + 1;   // interior u row aligned with physical cell row i
+                const int vCol = j + 1;   // interior v col aligned with physical cell col j
+                uCenter(i, j) = 0.5f * (u(uRow, j) + u(uRow, j + 1));
+                vCenter(i, j) = 0.5f * (v(i, vCol) + v(i + 1, vCol));
 
-                // Pressure stored with ghost padding; clamp to interior rows/cols
-                // for a cell-aligned export without ghost-corner artifacts.
-                const int pRow = std::max(1, std::min(i + 1, M - 1));
-                const int pCol = std::max(1, std::min(j + 1, N - 1));
-                pCenter(i, j) = p(pRow, pCol);
+                // Pressure at physical cell center (offset by 1 due to ghost padding).
+                pCenter(i, j) = p(i + 1, j + 1);
             }
         }
     }
@@ -116,17 +120,17 @@ void SIMPLE::saveAll()
     // ---------------------------------------------------------
     // 3. CALCULATE PRESSURE GRADIENT (FULL DOMAIN)
     // ---------------------------------------------------------
-    Eigen::MatrixXf pGradX = Eigen::MatrixXf::Zero(M, N);  // dp/dx
-    Eigen::MatrixXf pGradY = Eigen::MatrixXf::Zero(M, N);  // dp/dy
-    Eigen::MatrixXf pGradMag = Eigen::MatrixXf::Zero(M, N); // |∇p|
+    Eigen::MatrixXf pGradX = Eigen::MatrixXf::Zero(physRows, physCols);  // dp/dx
+    Eigen::MatrixXf pGradY = Eigen::MatrixXf::Zero(physRows, physCols);  // dp/dy
+    Eigen::MatrixXf pGradMag = Eigen::MatrixXf::Zero(physRows, physCols); // |∇p|
     
     {
         ScopedTimer t2("Output: Pressure Gradient Calculation");
-        for (int i = 0; i < M; ++i) {
-            for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < physRows; ++i) {
+            for (int j = 0; j < physCols; ++j) {
                 // Compute gradient for ALL cells (topology optimization consistency)
                     // dp/dx using central difference where possible
-                    if (j > 0 && j < N - 1) {
+                    if (j > 0 && j < physCols - 1) {
                         pGradX(i, j) = (pCenter(i, j + 1) - pCenter(i, j - 1)) / (2.0f * hx);
                     } else if (j == 0) {
                         pGradX(i, j) = (pCenter(i, j + 1) - pCenter(i, j)) / hx;  // Forward diff
@@ -135,7 +139,7 @@ void SIMPLE::saveAll()
                     }
                     
                     // dp/dy using central difference where possible
-                    if (i > 0 && i < M - 1) {
+                    if (i > 0 && i < physRows - 1) {
                         pGradY(i, j) = (pCenter(i + 1, j) - pCenter(i - 1, j)) / (2.0f * hy);
                     } else if (i == 0) {
                         pGradY(i, j) = (pCenter(i + 1, j) - pCenter(i, j)) / hy;  // Forward diff
@@ -152,19 +156,19 @@ void SIMPLE::saveAll()
     // ---------------------------------------------------------
     // 4. EXPORT THERMAL DATA (CROPPED)
     // ---------------------------------------------------------
-    int N_thermal = N - N_in_buffer - N_out_buffer;
+    int N_thermal = physCols - N_in_buffer - N_out_buffer;
     
     if (N_thermal <= 0) {
         std::cerr << "Error: Thermal domain size is <= 0. Check buffer sizes." << std::endl;
     } else {
         ScopedTimer t2("Output: Thermal Data Cropping & txt");
-        Eigen::MatrixXf uThermal = Eigen::MatrixXf::Zero(M, N_thermal);
-        Eigen::MatrixXf vThermal = Eigen::MatrixXf::Zero(M, N_thermal);
-        Eigen::MatrixXf pThermal = Eigen::MatrixXf::Zero(M, N_thermal);
-        Eigen::MatrixXf pGradThermal = Eigen::MatrixXf::Zero(M, N_thermal);
+        Eigen::MatrixXf uThermal = Eigen::MatrixXf::Zero(physRows, N_thermal);
+        Eigen::MatrixXf vThermal = Eigen::MatrixXf::Zero(physRows, N_thermal);
+        Eigen::MatrixXf pThermal = Eigen::MatrixXf::Zero(physRows, N_thermal);
+        Eigen::MatrixXf pGradThermal = Eigen::MatrixXf::Zero(physRows, N_thermal);
         
         // Slice the matrix: Skip 'N_in_buffer' columns
-        for (int i = 0; i < M; ++i) {
+        for (int i = 0; i < physRows; ++i) {
             for (int j = 0; j < N_thermal; ++j) {
                 int src_j = j + N_in_buffer;
                 uThermal(i, j) = uCenter(i, src_j);
@@ -192,24 +196,24 @@ void SIMPLE::saveAll()
             vtk << "SIMPLE CFD Results\n";
             vtk << "ASCII\n";
             vtk << "DATASET STRUCTURED_POINTS\n";
-            vtk << "DIMENSIONS " << N << " " << M << " 1\n"; 
+            vtk << "DIMENSIONS " << physCols << " " << physRows << " 1\n"; 
             vtk << "ORIGIN 0 0 0\n";
             vtk << "SPACING " << hx << " " << hy << " 1\n";
-            vtk << "POINT_DATA " << N * M << "\n";
+            vtk << "POINT_DATA " << physCols * physRows << "\n";
 
             // Pressure
             vtk << "SCALARS pressure double 1\n";
             vtk << "LOOKUP_TABLE default\n";
-            for (int i = 0; i < M; ++i) {     
-                for (int j = 0; j < N; ++j) { 
+            for (int i = 0; i < physRows; ++i) {     
+                for (int j = 0; j < physCols; ++j) { 
                     vtk << pCenter(i, j) << "\n";
                 }
             }
 
             // Velocity Vectors
             vtk << "VECTORS velocity double\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << uCenter(i, j) << " " << vCenter(i, j) << " 0.0\n";
                 }
             }
@@ -217,8 +221,8 @@ void SIMPLE::saveAll()
             // Cell Type (Geometry) - continuous values 0=fluid, 1=solid
             vtk << "SCALARS cellType double 1\n";
             vtk << "LOOKUP_TABLE default\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << cellType(i, j) << "\n";
                 }
             }
@@ -226,8 +230,8 @@ void SIMPLE::saveAll()
             // Density field (gamma): 1=fluid, 0=solid, intermediate=buffer
             vtk << "SCALARS Density double 1\n";
             vtk << "LOOKUP_TABLE default\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << gamma(i, j) << "\n";
                 }
             }
@@ -235,8 +239,8 @@ void SIMPLE::saveAll()
             // Brinkman alpha field (penalization strength)
             vtk << "SCALARS Alpha double 1\n";
             vtk << "LOOKUP_TABLE default\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << alpha(i, j) << "\n";
                 }
             }
@@ -244,16 +248,16 @@ void SIMPLE::saveAll()
             // Pressure Gradient Magnitude
             vtk << "SCALARS PressureGradient double 1\n";
             vtk << "LOOKUP_TABLE default\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << pGradMag(i, j) << "\n";
                 }
             }
             
             // Pressure Gradient Vector
             vtk << "VECTORS pressure_gradient double\n";
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
                     vtk << pGradX(i, j) << " " << pGradY(i, j) << " 0.0\n";
                 }
             }
@@ -345,10 +349,12 @@ void SIMPLE::printStaticDp(int iter,
 }
 
 void SIMPLE::paintBoundaries() {
-    Eigen::MatrixXf BCs = Eigen::MatrixXf::Zero(M, N);
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            BCs(i, j) = checkBoundaries(i, j);
+    const int physRows = M - 1;
+    const int physCols = N - 1;
+    Eigen::MatrixXf BCs = Eigen::MatrixXf::Zero(physRows, physCols);
+    for (int i = 0; i < physRows; ++i) {
+        for (int j = 0; j < physCols; ++j) {
+            BCs(i, j) = checkBoundaries(i + 1, j + 1);
         }
     }
     saveMatrix(BCs, "BC");

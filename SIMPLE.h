@@ -86,7 +86,7 @@ public:
     // "Full" planes span the entire domain (auto-calculated: 0 to N*hx).
     
     float xPlaneCoreInlet  = 0.01f;   // Core inlet sampling plane [m] (after inlet buffer)
-    float xPlaneCoreOutlet = 0.050f;  // Core outlet sampling plane [m] (before outlet buffer)
+    float xPlaneCoreOutlet = 0.05f;  // Core outlet sampling plane [m] (before outlet buffer)
 
     // =========================================================================
     // PRESSURE-DROP BASED CONVERGENCE
@@ -96,7 +96,7 @@ public:
     // (pressure drop) has already converged.
     
     bool   usePressureDropConvergence = true;   // Enable this convergence mode
-    int    dpConvergenceWindow = 500;          // Moving window size [iterations]
+    int    dpConvergenceWindow = 1000;          // Moving window size [iterations]
     float  dpConvergencePercent = 1.0f;         // Converged if std_dev < this % of mean
     bool   usePressureDropSlopeGate = false;    // Additional check: slope must be near-zero
     int    dpSlopeWindowIters = 1000;           // Window for slope calculation
@@ -173,8 +173,8 @@ public:
     
     // Momentum solver tolerance and iterations
     // Momentum solver tolerance and iterations
-    float  momentumTol = 1e-5f;      // Convergence tolerance for momentum solver
-    int    maxMomentumIter = 200;    // Max iterations for Jacobi/SOR
+    float  momentumTol = 1e-6f;      // Convergence tolerance for momentum solver
+    int    maxMomentumIter = 400;    // Max iterations for Jacobi/SOR
     
     // SOR (Successive Over-Relaxation) for momentum solver
     // omega = 1.0: Pure Jacobi
@@ -238,8 +238,8 @@ public:
     // Reference: Haertel et al., "Topology optimization of microchannel heat sinks"
     
     // Default K_min keeps the same α_max as previous defaults:
-    // Da = 1e-8 and L_ref = 1e-3 m -> K_min = 1e-14 m^2
-    float  brinkmanKMin = 1e-14f;       // Solid-side permeability K_min [m^2]
+    // Da = 1e-8 and L_ref = 1e-3 m -> K_min = 1e-14 m^2 lowr value=lower permeability
+    float  brinkmanKMin = 1e-13f;       // Solid-side permeability K_min [m^2]
     float  brinkmanAlphaMax = 0.0f;     // Computed at runtime: μ / K_min
     float  brinkmanQ = 1.0f;            // RAMP convexity parameter (Haertel: 1-8, use 1 for strong penalization)
 
@@ -275,20 +275,20 @@ public:
     // If residual decreases, CFL increases proportionally.
     // If residual increases, CFL decreases proportionally.
     // When enabled, this DISABLES other CFL ramping mechanisms.
-    bool   enableSER        = true;       // Enable SER (disables other CFL ramps)
-    float  serCFLMin        = 0.1f;       // Minimum CFL for SER
-    float  serCFLMax        = 5.0f;      // Maximum CFL for SER (reduced for stability)
+    bool   enableSER        = false;       // Enable SER (disables other CFL ramps)
+    float  serCFLMin        = 0.01f;       // Minimum CFL for SER
+    float  serCFLMax        = 10.0f;      // Maximum CFL for SER (reduced for stability)
     float  serResidPrev     = 0.0f;       // Previous iteration L2 residual (for tracking)
     float  serSmooth        = 0.5f;       // Smoothing factor (0 = no smoothing, 1 = full new) - increased for stability
     int    serMinIter       = 10;         // Don't apply SER until this many iterations - increased for stability
     float  serMaxIncrease   = 1.1f;      // Max CFL increase per iteration (5%)
     float  serMaxDecrease   = 0.7f;       // Max CFL decrease per iteration (Lower value is more aggressive decrease by 30%)
-    bool   serUseMaxResid   = false;       // true = use max(U,V,Mass), false = use Mass only
+    bool   serUseMaxResid   = true;       // true = use max(U,V,Mass), false = use Mass only
     
     // Line search for robustness (coupled with SER)
     // Ensures solution updates actually reduce residuals
     // If residual increases too much, temporarily reduce CFL to stabilize
-    bool   enableLineSearch = true;       // Enable backtracking line search
+    bool   enableLineSearch = false;       // Enable backtracking line search
     float  lsAlphaMin       = 0.1f;       // Minimum step size (don't go below this)
     float  lsAlphaReduce    = 0.3f;       // Reduction factor for backtracking (try α, α/3, α/9, ...)
     int    lsMaxTries       = 4;          // Max backtracking attempts
@@ -300,7 +300,7 @@ public:
     // CFL ramping parameters (residual-based acceleration):
     // -------------------------------------------------------------------------
     // NOTE: Disabled when enableSER = true
-    bool   enableCflRamp    = true;       // Enable automatic CFL increase
+    bool   enableCflRamp    = false;       // Enable automatic CFL increase
     float  pseudoCFLInitial = 0.1f;       // Starting CFL (0.1 is a more conservative value)
     float  pseudoCFLMax     = 30.0f;      // Maximum CFL (reduced for stability) 
     float  cflRampStartRes  = 1e-4f;      // Begin ramping later
@@ -318,8 +318,11 @@ public:
     // Structured Cartesian grid with uniform spacing.
     // These values are read from ExportFiles/fluid_params.txt.
     
-    int M = 0;       // Number of rows (y-direction cells)
-    int N = 0;       // Number of columns (x-direction cells)
+    // Internal padded counts:
+    // - Physical cell counts from file are (M-1) x (N-1)
+    // - Interior solver loops i=1..M-1, j=1..N-1 then cover all physical cells.
+    int M = 0;       // Internal row count (physical Ny + 1)
+    int N = 0;       // Internal column count (physical Nx + 1)
     int N_in_buffer = 0;   // Inlet buffer zone columns (for thermal cropping)
     int N_out_buffer = 0;  // Outlet buffer zone columns (for thermal cropping)
     float hy = 0.0f; // Cell height [m] (Δy)
@@ -354,7 +357,7 @@ public:
     // Lower values = more stable but slower convergence
     // Typical ranges: velocity 0.3-0.8, pressure 0.1-0.3
     
-    float uvAlpha = 0.7f;    // Velocity under-relaxation factor (reduced for stability)
+    float uvAlpha = 0.5f;    // Velocity under-relaxation factor (reduced for stability)
     float pAlpha  = 0.2f;    // Pressure under-relaxation factor (reduced for stability)
 
     // =========================================================================
@@ -642,6 +645,26 @@ inline float gammaAtV(const SIMPLE& s, int i, int j) {
 }
 
 // -----------------------------------------------------------------------------
+// External No-Slip Wall Detection
+// -----------------------------------------------------------------------------
+// Detect which outer domain sides are currently behaving as no-slip walls.
+// This is used by momentum assembly to apply half-cell diffusion treatment
+// for tangential velocity components at wall-adjacent control volumes.
+//
+// Notes:
+// - A side is considered a wall when both velocity components are ~0 there and
+//   pressure behaves like zero-normal-gradient on that side.
+// - Right pressure-outlet (p pinned to 0) is explicitly filtered out.
+struct ExternalWallFlags {
+    bool left = false;
+    bool right = false;
+    bool bottom = false;
+    bool top = false;
+};
+
+ExternalWallFlags detectExternalNoSlipWalls(const SIMPLE& s);
+
+// -----------------------------------------------------------------------------
 // Second-Order Upwind (SOU) Deferred Correction Functions
 // -----------------------------------------------------------------------------
 // These compute the deferred correction source term for second-order upwind.
@@ -689,6 +712,13 @@ struct PlaneMetrics {
 // Uses linear interpolation between adjacent cell columns.
 // Skips rows unless both adjacent cells are pure fluid (gamma ~= 1).
 PlaneMetrics samplePlaneAtX(const SIMPLE& solver, float xPhysical);
+
+// Sample metrics directly on a domain boundary patch (strict boundary-face integral).
+// inletBoundary=true  -> x=0 inlet patch
+// inletBoundary=false -> x=L outlet patch
+// Uses boundary-face static pressure and boundary-face velocities.
+// Includes only faces adjacent to pure-fluid cells (gamma ~= 1).
+PlaneMetrics sampleBoundaryPatch(const SIMPLE& solver, bool inletBoundary);
 
 // Debug helper: print detailed plane metrics to console
 void printPlaneInfo(const char* name, float xPhysical, const PlaneMetrics& m);
