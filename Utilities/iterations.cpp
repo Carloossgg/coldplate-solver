@@ -12,7 +12,7 @@
 //   2. SOLVE U-MOMENTUM (x-direction)
 //      - Assemble coefficient matrix with diffusion + convection (FOU or SOU)
 //      - Add pseudo-transient term: ρV/Δt * (u - u_old) for stability
-//      - Add 2.5D sink term: -(5μ/2Ht²) * u for out-of-plane friction
+//      - Add 2.5D sink term: -(12μ/Ht²) * u for out-of-plane friction
 //      - Apply under-relaxation: u* = α*u_new + (1-α)*u_old
 //      - Compute d-coefficient for velocity correction
 //
@@ -104,17 +104,36 @@ float SIMPLE::calculateStep(int& pressureIterations)
     const float maxVel = 3.0f * std::max(std::abs(inletVelocity), 0.1f);
 
     // Keep BCs explicitly synchronized before assembling momentum equations.
-    // This also enables robust runtime detection of external no-slip walls.
+    // Half-cell diffusion activation is determined FACE-LOCALLY from the
+    // boundary values and fluid mask (gamma), not with global side toggles.
     setVelocityBoundaryConditions(u, v);
     setPressureBoundaryConditions(p);
-    const ExternalWallFlags externalWalls = detectExternalNoSlipWalls(*this);
+    constexpr float halfCellFluidTol = 0.999f;
     static bool printedHalfCellActivation = false;
     if (!printedHalfCellActivation) {
-        std::cout << "Half-cell diffusion activation:"
-                  << " bottom=" << (externalWalls.bottom ? "ON" : "OFF")
-                  << " top=" << (externalWalls.top ? "ON" : "OFF")
-                  << " left=" << (externalWalls.left ? "ON" : "OFF")
-                  << " right=" << (externalWalls.right ? "ON" : "OFF")
+        int bottomActive = 0, topActive = 0, leftActive = 0, rightActive = 0;
+        int bottomTotal = 0, topTotal = 0, leftTotal = 0, rightTotal = 0;
+        for (int j = 1; j < N - 1; ++j) {
+            bottomTotal++;
+            if (hasExternalNoSlipSouthForU(*this, 1, j, halfCellFluidTol)) bottomActive++;
+        }
+        for (int j = 1; j < N - 1; ++j) {
+            topTotal++;
+            if (hasExternalNoSlipNorthForU(*this, M - 1, j, halfCellFluidTol)) topActive++;
+        }
+        for (int i = 1; i < M - 1; ++i) {
+            leftTotal++;
+            if (hasExternalNoSlipWestForV(*this, i, 1, halfCellFluidTol)) leftActive++;
+        }
+        for (int i = 1; i < M - 1; ++i) {
+            rightTotal++;
+            if (hasExternalNoSlipEastForV(*this, i, N - 1, halfCellFluidTol)) rightActive++;
+        }
+        std::cout << "Half-cell diffusion (face-local external no-slip):"
+                  << " U-south=" << bottomActive << "/" << bottomTotal
+                  << ", U-north=" << topActive << "/" << topTotal
+                  << ", V-west=" << leftActive << "/" << leftTotal
+                  << ", V-east=" << rightActive << "/" << rightTotal
                   << std::endl;
         printedHalfCellActivation = true;
     }
@@ -201,12 +220,9 @@ float SIMPLE::calculateStep(int& pressureIterations)
     // -------------------------------------------------------------------------
     // Pseudo-transient Δt calculation setup
     // -------------------------------------------------------------------------
-    // Use minimum cell size for CFL stability
-    const float hChar = std::min(hx, hy);
-    
     // Statistics for pseudo-Δt (for diagnostic logging)
-    float uDtMin = timeStep, uDtMax = 0.0f, uDtSum = 0.0f;
-    float vDtMin = timeStep, vDtMax = 0.0f, vDtSum = 0.0f;
+    float uDtMin = std::numeric_limits<float>::infinity(), uDtMax = 0.0f, uDtSum = 0.0f;
+    float vDtMin = std::numeric_limits<float>::infinity(), vDtMax = 0.0f, vDtSum = 0.0f;
     long long uDtCount = 0;
     long long vDtCount = 0;
 
@@ -224,12 +240,9 @@ float SIMPLE::calculateStep(int& pressureIterations)
     // Δt = CFL * Δx / |u|, clamped to global maximum timeStep
     // This allows faster convergence in low-velocity regions while maintaining
     // stability in high-velocity regions.
-    auto computeLocalDt = [&](float normalVel) -> float {
+    auto computeLocalDt = [&](float speed) -> float {
         if (!pseudoActive) return std::numeric_limits<float>::infinity();
-        if (!useLocalPseudoTime) return timeStep;  // Use global Δt if local is disabled
-        float speed = std::max(std::abs(normalVel), minPseudoSpeed);  // Prevent divide-by-zero
-        float dtCfl = pseudoCFL * hChar / speed;  // CFL-based local Δt
-        return std::min(timeStep, dtCfl);  // Clamp to global maximum
+        return computePseudoDtFromSpeed(speed);
     };
 
     // -------------------------------------------------------------------------
@@ -243,14 +256,14 @@ float SIMPLE::calculateStep(int& pressureIterations)
     // -------------------------------------------------------------------------
     const bool useSOU = (convectionScheme == 1);  // Second-order upwind?
     
-    // 2.5D model: scale convection by 6/7 (accounts for parabolic profile).
+    // 2.5D model: user-defined convection scaling factor (1.0 = OFF).
     // Master switch behavior: when 2.5D is OFF, convection scaling is OFF.
-    const float convScale = (enableTwoPointFiveD && enableConvectionScaling) ? (6.0f / 7.0f) : 1.0f;
+    const float convScale = enableTwoPointFiveD ? twoPointFiveDConvectionFactor : 1.0f;
     
-    // 2.5D sink coefficient: -(5μ/2Ht²) * multiplier for parallel-plate friction
-    // Base is (5/2)μ/Ht²; multiplier ≈4.8 gives 12μ/Ht² (Poiseuille friction)
+    // 2.5D sink coefficient: -(12μ/Ht²) * multiplier for parallel-plate friction
+    // Base is 12μ/Ht² (classical depth-averaged model)
     const float sinkCoeff = (enableTwoPointFiveD && Ht_channel > 0.0f)
-                                 ? twoPointFiveDSinkMultiplier * (5.0f * eta / (2.0f * Ht_channel * Ht_channel))
+                                 ? twoPointFiveDSinkMultiplier * (12.0f * eta / (Ht_channel * Ht_channel))
                                  : 0.0f;
     const float sinkDiag = sinkCoeff * vol;  // Diagonal contribution from sink term
     
@@ -290,7 +303,7 @@ float SIMPLE::calculateStep(int& pressureIterations)
             float vn = std::max(-maxVel, std::min(maxVel, 0.5f * (v(i, j) + v(i, j + 1))));
             float vs = std::max(-maxVel, std::min(maxVel, 0.5f * (v(i - 1, j) + v(i - 1, j + 1))));
 
-            // Convective fluxes (scaled by 6/7 for 2.5D model)
+            // Convective fluxes (scaled by user 2.5D convection factor)
             float Fe = convScale * rho * hy * ue;
             float Fw = convScale * rho * hy * uw;
             float Fn = convScale * rho * hx * vn;
@@ -304,17 +317,17 @@ float SIMPLE::calculateStep(int& pressureIterations)
 
             // Half-cell wall diffusion for tangential velocity at external
             // horizontal no-slip walls (u-momentum).
-            if (externalWalls.bottom && (i - 1 == 0)) {
+            if (hasExternalNoSlipSouthForU(*this, i, j, halfCellFluidTol)) {
                 aS += Dn;
             }
-            if (externalWalls.top && (i + 1 == M)) {
+            if (hasExternalNoSlipNorthForU(*this, i, j, halfCellFluidTol)) {
                 aN += Dn;
             }
 
             float Sdc = useSOU ? computeSOUCorrectionU(*this, i, j, Fe, Fw, Fn, Fs) : 0.0f;
 
             float sumA = aE + aW + aN + aS;
-            float dtLocal = computeLocalDt(u(i, j));
+            float dtLocal = computeLocalDt(pseudoSpeedAtU(i, j));
             if (pseudoActive && useLocalPseudoTime && logPseudoDtStats) {
                 updateStats(dtLocal, uDtMin, uDtMax, uDtSum, uDtCount);
             }
@@ -390,7 +403,7 @@ float SIMPLE::calculateStep(int& pressureIterations)
             float vn = std::max(-maxVel, std::min(maxVel, 0.5f * (v(i, j) + v(i + 1, j))));
             float vs = std::max(-maxVel, std::min(maxVel, 0.5f * (v(i - 1, j) + v(i, j))));
 
-            // Convective fluxes (scaled by 6/7 for 2.5D model)
+            // Convective fluxes (scaled by user 2.5D convection factor)
             float Fe = convScale * rho * hy * ue;
             float Fw = convScale * rho * hy * uw;
             float Fn = convScale * rho * hx * vn;
@@ -404,17 +417,17 @@ float SIMPLE::calculateStep(int& pressureIterations)
 
             // Half-cell wall diffusion for tangential velocity at external
             // vertical no-slip walls (v-momentum).
-            if (externalWalls.left && (j - 1 == 0)) {
+            if (hasExternalNoSlipWestForV(*this, i, j, halfCellFluidTol)) {
                 aW += De;
             }
-            if (externalWalls.right && (j + 1 == N)) {
+            if (hasExternalNoSlipEastForV(*this, i, j, halfCellFluidTol)) {
                 aE += De;
             }
 
             float Sdc = useSOU ? computeSOUCorrectionV(*this, i, j, Fe, Fw, Fn, Fs) : 0.0f;
 
             float sumA = aE + aW + aN + aS;
-            float dtLocal = computeLocalDt(v(i, j));
+            float dtLocal = computeLocalDt(pseudoSpeedAtV(i, j));
             if (pseudoActive && useLocalPseudoTime && logPseudoDtStats) {
                 updateStats(dtLocal, vDtMin, vDtMax, vDtSum, vDtCount);
             }

@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 # Physical geometry
 Lx_total = 0.060     # [m]
 Ly_total = 0.0006    # [m]
-Ht_channel = 0.0     # [m], pure 2D export
+Ht_channel = 0.004     # [m], pure 2D export
 
 # Flow/thermal metadata for solver input files
 U_inlet_phys = 1.0   # [m/s]

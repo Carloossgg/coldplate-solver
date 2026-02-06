@@ -92,7 +92,7 @@ Results (fields, histories, VTK) land in `ExportFiles/`.
 - Convection scheme: `convectionScheme = 0/1` (FOU/SOU).
 - Iteration limits/convergence: `maxIterations`, `epsilon`, pressure-drop convergence options.
 - Inlet ramp: `enableInletRamp`, `rampSteps`.
-- Optional 2.5D model (two-layer microchannel): set `enableTwoPointFiveD = true`. This activates the **2.5D Pressure Drop Model**, which applies the 6/7 convection scaling and the $-(5\mu/2H_t^2)$ linear sink term to account for out-of-plane drag. `Ht_channel` is read automatically from `ExportFiles/fluid_params.txt`.
+- Optional 2.5D model (two-layer microchannel): set `enableTwoPointFiveD = true`. This activates the **2.5D Pressure Drop Model**, which applies user-configurable convection scaling (`twoPointFiveDConvectionFactor`, default 1.0) and the $-(12\mu/H_t^2)$ linear sink term to account for out-of-plane drag. `Ht_channel` is read automatically from `ExportFiles/fluid_params.txt`.
 
 ## Density-Based Topology Optimization (MMA-ready)
 Based on: *"Topology optimization of microchannel heat sinks using a two-layer model"* (Haertel et al., 2018)

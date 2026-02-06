@@ -302,8 +302,8 @@ void SIMPLE::saveAll()
 void SIMPLE::initLogFiles(std::ofstream& residFile, std::ofstream& dpFile) {
     residFile.open("ExportFiles/residuals.txt");
     dpFile.open("ExportFiles/pressure_drop_history.txt");
-    residFile << "Iter MassRMS U_RMS V_RMS MassRMSn U_RMSn V_RMSn Core_dP_AfterInletBuffer(Pa) "
-              << "Full_dP_FullSystem(Pa) CFL" << std::endl;
+    residFile << "Iter MassRMS U_RMS V_RMS MassRMSn U_RMSn V_RMSn NormEnabled "
+              << "Core_dP_AfterInletBuffer(Pa) Full_dP_FullSystem(Pa) CFL CFL_ratio" << std::endl;
     dpFile << "Iter Core_Total(Pa) Full_Total(Pa) Core_Static(Pa) Full_Static(Pa)" << std::endl;
     printIterationHeader();
 }
@@ -322,8 +322,9 @@ void SIMPLE::printIterationHeader() const {
               << std::setw(16) << "Full dP (Pa)"
               << std::setw(10) << "Time (ms)"
               << std::setw(10) << "CFL"
+              << std::setw(10) << "CFL-r"
               << std::setw(6) << "P-It" << std::endl;
-    std::cout << std::string(132, '-') << std::endl;
+    std::cout << std::string(142, '-') << std::endl;
 }
 
 void SIMPLE::writeIterationLogs(std::ofstream& residFile,
@@ -333,7 +334,8 @@ void SIMPLE::writeIterationLogs(std::ofstream& residFile,
                                 float fullPressureDrop,
                                 float coreStaticDrop,
                                 float fullStaticDrop,
-                                float pseudoCFL) {
+                                float pseudoCFL,
+                                float pseudoCFLRatio) {
     const float massRMS = residMass_RMS;
     const float uRMS = residU_RMS;
     const float vRMS = residV_RMS;
@@ -348,9 +350,11 @@ void SIMPLE::writeIterationLogs(std::ofstream& residFile,
               << massRMSn << " "
               << uRMSn << " "
               << vRMSn << " "
+              << (enableNormalizedResiduals ? 1 : 0) << " "
               << corePressureDrop << " "
               << fullPressureDrop << " "
-              << pseudoCFL << std::endl;
+              << pseudoCFL << " "
+              << pseudoCFLRatio << std::endl;
 
     dpFile << iter << " "
            << corePressureDrop << " "
@@ -368,7 +372,8 @@ void SIMPLE::printIterationRow(int iter,
                                float fullPressureDrop,
                                float iterTimeMs,
                                int pressureIterations,
-                               float pseudoCFL) const {
+                               float pseudoCFL,
+                               float pseudoCFLRatio) const {
     std::cout << std::setw(8) << iter
               << std::setw(14) << std::scientific << std::setprecision(3) << residMassVal
               << std::setw(14) << residUVal
@@ -378,6 +383,7 @@ void SIMPLE::printIterationRow(int iter,
               << std::setw(16) << fullPressureDrop
               << std::setw(10) << std::fixed << std::setprecision(1) << iterTimeMs
               << std::setw(10) << std::fixed << std::setprecision(2) << pseudoCFL
+              << std::setw(10) << std::fixed << std::setprecision(2) << pseudoCFLRatio
               << std::setw(6) << pressureIterations
               << std::endl;
 }

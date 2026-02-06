@@ -90,11 +90,8 @@ void SIMPLE::loadParameters(const std::string& fileName) {
         pseudoRefLength = domainLength / 100.0f;  // 1% of domain length
     }
 
-    // Initialize CFL ramping state
-    if (enableCflRamp) {
-        // Start from user-defined initial CFL
-        pseudoCFL = pseudoCFLInitial;
-    }
+    // Initialize pseudo-time controller state (mode-dependent).
+    resetPseudoTimeControllerState();
     
     // Calculate Reynolds number
     float L_char = nCellsY * hx;
@@ -109,13 +106,13 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     std::cout << "Algorithm: SIMPLE" << std::endl;
     // Real runtime check (what is actually active in momentum equations):
     // - sink term active only if master switch is ON and Ht_channel > 0
-    // - convection scaling active only if master switch is ON and scaling switch is ON
+    // - convection scaling uses user factor only when master switch is ON
     const bool sinkActive = (enableTwoPointFiveD && Ht_channel > 0.0f);
-    const bool convScaleActive = (enableTwoPointFiveD && enableConvectionScaling);
+    const float convScaleRuntime = enableTwoPointFiveD ? twoPointFiveDConvectionFactor : 1.0f;
+    const bool convScaleActive = enableTwoPointFiveD && (std::abs(convScaleRuntime - 1.0f) > 1e-6f);
     const float sinkCoeffRuntime = sinkActive
-        ? twoPointFiveDSinkMultiplier * (5.0f * eta / (2.0f * Ht_channel * Ht_channel))
+        ? twoPointFiveDSinkMultiplier * (12.0f * eta / (Ht_channel * Ht_channel))
         : 0.0f;
-    const float convScaleRuntime = convScaleActive ? (6.0f / 7.0f) : 1.0f;
 
     std::cout << "2.5D runtime status:" << std::endl;
     if (sinkActive || convScaleActive) {
@@ -144,8 +141,8 @@ void SIMPLE::loadParameters(const std::string& fileName) {
                   << " | smoothWeight=" << residualViscSmoothWeight
                   << std::endl;
     }
-    std::cout << "Residual reporting: " 
-              << (enableNormalizedResiduals ? "RMS normalized (initial)" : "MAX raw") 
+    std::cout << "Residual reporting: "
+              << (enableNormalizedResiduals ? "RMS normalized (initial)" : "RMS raw")
               << std::endl;
     const char* solverNames[] = {"SOR (Red-Black)", "Parallel CG (Jacobi)", "AMGCL (AMG+CG)", "Direct LDLT (Serial)", "AMGCL-CUDA (GPU Float)"};
     int solverIdx = std::min(std::max(pressureSolverType, 0), 4);
@@ -208,15 +205,36 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     std::cout << "Re: " << std::fixed << std::setprecision(0) << Re << std::endl;
     std::cout << "Pseudo dt: " << std::scientific << timeStep << " s (manual)" << std::endl;
     if (enablePseudoTimeStepping) {
-        std::cout << "Pseudo CFL: " << std::defaultfloat << pseudoCFL << std::endl;
+        std::cout << "Pseudo CFL: " << std::defaultfloat << pseudoCFL
+                  << " | ratio=" << pseudoCFLRatio << std::endl;
         std::cout << "Pseudo ref length: " << std::scientific << pseudoRefLength << " m (mesh-independent)" << std::endl;
         std::cout << "Local pseudo time: " << (useLocalPseudoTime ? "ON" : "OFF") << std::endl;
-        if (enableCflRamp) {
-            std::cout << "CFL ramping: ON (CFL_init=" << pseudoCFLInitial
-                      << ", CFL_max=" << pseudoCFLMax
-                      << ", startRes=" << cflRampStartRes << ")\n";
+        if ((pseudoControllerMode == 1 || pseudoControllerMode == 2) && !useLocalPseudoTime) {
+            std::cout << "  Warning: COMSOL-style controller is configured with global pseudo time; "
+                         "for strict COMSOL behavior, set useLocalPseudoTime=true.\n";
+        }
+        if (pseudoControllerMode == 0) {
+            std::cout << "Pseudo controller: LEGACY";
+            if (enableCflRamp) {
+                std::cout << " (CFL ramp ON: CFL_init=" << pseudoCFLInitial
+                          << ", CFL_max=" << pseudoCFLMax
+                          << ", startRes=" << cflRampStartRes << ")";
+            } else {
+                std::cout << " (CFL ramp OFF)";
+            }
+            std::cout << "\n";
+        } else if (pseudoControllerMode == 1) {
+            std::cout << "Pseudo controller: COMSOL manual schedule (Eq. 3-66)\n";
+            std::cout << "  CFL_inf=" << pseudoCFLInfinity
+                      << " | convergence gate=" << (pseudoUseCFLRatioGate ? "ON" : "OFF") << "\n";
         } else {
-            std::cout << "CFL ramping: OFF\n";
+            std::cout << "Pseudo controller: COMSOL PID (Eq. 20-7)\n";
+            std::cout << "  tol=" << comsolPIDTol
+                      << " | kP=" << comsolPIDkP
+                      << " | kI=" << comsolPIDkI
+                      << " | kD=" << comsolPIDkD
+                      << " | CFL_inf=" << pseudoCFLInfinity
+                      << " | convergence gate=" << (pseudoUseCFLRatioGate ? "ON" : "OFF") << "\n";
         }
     } else {
         std::cout << "Pseudo time stepping: DISABLED" << std::endl;
@@ -350,7 +368,14 @@ void SIMPLE::runIterations() {
     // Total simulation time tracking
     auto simStart = std::chrono::high_resolution_clock::now();
 
-    while (iter < maxIterations && error > epsilon && !dpConverged) {
+    auto pseudoGateSatisfied = [&]() -> bool {
+        if (!enablePseudoTimeStepping) return true;
+        if (!pseudoUseCFLRatioGate) return true;
+        if (pseudoControllerMode == 0) return true; // Legacy mode keeps legacy convergence behavior.
+        return pseudoCFLRatio >= 1.0f;
+    };
+
+    while (iter < maxIterations && (error > epsilon || !pseudoGateSatisfied()) && !dpConverged) {
         auto iterStart = std::chrono::high_resolution_clock::now();
 
         // Optional inlet velocity ramp (useful for aggressive start-up damping)
@@ -371,16 +396,16 @@ void SIMPLE::runIterations() {
             error = calculateStep(pressureIterations);
         }
 
-        // CFL ramping: SER takes precedence if enabled, otherwise use other methods
+        // Pseudo-time controller update (legacy or COMSOL-style)
         {
             ScopedTimer t("Outer: CFL Ramping & Line Search");
-            // Time-control should use raw RMS residuals (not normalized) for stability logic.
-            float monitoringResid = serUseMaxResid
+            // Time-control should use raw RMS residuals (not normalized).
+            const bool useMaxMetric = (pseudoControllerMode == 0) ? serUseMaxResid
+                                                                  : pseudoUseMaxResidualMetric;
+            float monitoringResid = useMaxMetric
                 ? std::max({residU_RMS, residV_RMS, residMass_RMS})
                 : residMass_RMS;
-            updateCflSER(monitoringResid, iter);      // Switched Evolution Relaxation (if enabled)
-            applyLineSearch(monitoringResid);         // Line search for robustness (works with SER)
-            updateCflRamp(monitoringResid);           // Residual-based ramp (disabled if SER on)
+            updatePseudoTimeController(monitoringResid, iter + 1);
         }
         
         auto iterEnd = std::chrono::high_resolution_clock::now();
@@ -472,14 +497,14 @@ void SIMPLE::runIterations() {
             writeIterationLogs(residFile, dpFile, iter,
                                corePressureDrop, fullPressureDrop,
                                coreStaticDrop, fullStaticDrop,
-                               pseudoCFL);
+                               pseudoCFL, pseudoCFLRatio);
 
             // Print to console every iteration
             float maxTransRes = std::max(transientResidU, transientResidV);
             printIterationRow(iter, residMass, residU, residV, maxTransRes,
                               corePressureDrop, fullPressureDrop,
                               iterTimeMs, pressureIterations,
-                               pseudoCFL);
+                               pseudoCFL, pseudoCFLRatio);
             if (iter % 100 == 0 || iter < 10) {
                 printStaticDp(iter, coreStaticDrop, fullStaticDrop);
             }
@@ -534,8 +559,11 @@ void SIMPLE::runIterations() {
     if (dpConverged) {
         std::cout << "CONVERGED (pressure drop stable within " << dpConvergencePercent 
                   << "% over " << dpConvergenceWindow << " iterations) after " << iter << " iterations" << std::endl;
-    } else if (error <= epsilon) {
+    } else if (error <= epsilon && pseudoGateSatisfied()) {
         std::cout << "CONVERGED (residuals) after " << iter << " iterations" << std::endl;
+    } else if (error <= epsilon && !pseudoGateSatisfied()) {
+        std::cout << "Reached residual tolerance but pseudo-CFL ratio gate not satisfied "
+                  << "(ratio=" << pseudoCFLRatio << "). Stopped at iteration limit." << std::endl;
     } else {
         std::cout << "Stopped at " << iter << " iterations (max reached)" << std::endl;
     }

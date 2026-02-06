@@ -145,63 +145,84 @@ void SIMPLE::setPressureBoundaryConditions(Eigen::MatrixXf& pIn)
     }
 }
 
+bool hasExternalNoSlipSouthForU(const SIMPLE& s, int i, int j, float fluidTol)
+{
+    if (i - 1 != 0) return false;               // Must be adjacent to bottom boundary
+    if (j < 1 || j > s.N - 2) return false;     // Interior u-face only
+    if (gammaAtU(s, i, j) < fluidTol) return false; // Exclude Brinkman/solid regions
+
+    const float velTol = 1e-8f;
+    const bool uZero = std::abs(s.u(0, j)) <= velTol;
+    const bool vZero = std::abs(s.v(0, j)) <= velTol && std::abs(s.v(0, j + 1)) <= velTol;
+    return uZero && vZero;
+}
+
+bool hasExternalNoSlipNorthForU(const SIMPLE& s, int i, int j, float fluidTol)
+{
+    if (i + 1 != s.M) return false;             // Must be adjacent to top boundary
+    if (j < 1 || j > s.N - 2) return false;     // Interior u-face only
+    if (gammaAtU(s, i, j) < fluidTol) return false; // Exclude Brinkman/solid regions
+
+    const float velTol = 1e-8f;
+    const bool uZero = std::abs(s.u(s.M, j)) <= velTol;
+    const bool vZero = std::abs(s.v(s.M - 1, j)) <= velTol &&
+                       std::abs(s.v(s.M - 1, j + 1)) <= velTol;
+    return uZero && vZero;
+}
+
+bool hasExternalNoSlipWestForV(const SIMPLE& s, int i, int j, float fluidTol)
+{
+    if (j - 1 != 0) return false;               // Must be adjacent to left boundary
+    if (i < 1 || i > s.M - 2) return false;     // Interior v-face only
+    if (gammaAtV(s, i, j) < fluidTol) return false; // Exclude Brinkman/solid regions
+
+    // Left side is inlet by default in this solver when targetVel > 0.
+    // Do not reinterpret inlet faces as walls even if the current iterate is near zero.
+    const float velTol = 1e-8f;
+    if (std::abs(s.targetVel) > velTol) return false;
+
+    const bool vZero = std::abs(s.v(i, 0)) <= velTol;
+    const bool uZero = std::abs(s.u(i, 0)) <= velTol && std::abs(s.u(i + 1, 0)) <= velTol;
+    return vZero && uZero;
+}
+
+bool hasExternalNoSlipEastForV(const SIMPLE& s, int i, int j, float fluidTol)
+{
+    if (j + 1 != s.N) return false;             // Must be adjacent to right boundary
+    if (i < 1 || i > s.M - 2) return false;     // Interior v-face only
+    if (gammaAtV(s, i, j) < fluidTol) return false; // Exclude Brinkman/solid regions
+
+    const float velTol = 1e-8f;
+    const float pPinTol = 1e-8f;
+
+    // Right side is outlet by default when pressure is pinned to zero.
+    // Do not reinterpret pressure-outlet faces as hard walls.
+    if (std::abs(s.p(i, s.N)) <= pPinTol) return false;
+
+    const bool vZero = std::abs(s.v(i, s.N)) <= velTol;
+    const bool uZero = std::abs(s.u(i, s.N - 1)) <= velTol &&
+                       std::abs(s.u(i + 1, s.N - 1)) <= velTol;
+    return vZero && uZero;
+}
+
 ExternalWallFlags detectExternalNoSlipWalls(const SIMPLE& s)
 {
     ExternalWallFlags flags;
     if (s.M < 2 || s.N < 2) return flags;
 
-    const float velTol = 1e-8f;
-    const float pGradTol = 1e-6f;
-    const float pPinTol = 1e-8f;
-
-    // Helper: iterate inclusive integer range [a, b].
-    auto allAbsBelowRange = [&](auto&& accessor, int a, int b, float tol) -> bool {
-        if (a > b) return true;
-        for (int k = a; k <= b; ++k) {
-            if (std::abs(accessor(k)) > tol) return false;
-        }
-        return true;
-    };
-
-    // Corner-aware checks:
-    // In this solver, inlet can overwrite u at (bottom-left, top-left) corners.
-    // For wall detection we ignore corner points and check the side interior.
-    const int uSideStart = 1;
-    const int uSideEnd = s.N - 2;
-    const bool uBottomZero = allAbsBelowRange([&](int j) { return s.u(0, j); }, uSideStart, uSideEnd, velTol);
-    const bool uTopZero = allAbsBelowRange([&](int j) { return s.u(s.M, j); }, uSideStart, uSideEnd, velTol);
-
-    const bool vBottomZero = allAbsBelowRange([&](int j) { return s.v(0, j); }, 0, s.N, velTol);
-    const bool vTopZero = allAbsBelowRange([&](int j) { return s.v(s.M - 1, j); }, 0, s.N, velTol);
-
-    bool pBottomNeumann = true;
-    bool pTopNeumann = true;
-    for (int j = 1; j < s.N; ++j) {
-        if (std::abs(s.p(0, j) - s.p(1, j)) > pGradTol) pBottomNeumann = false;
-        if (std::abs(s.p(s.M, j) - s.p(s.M - 1, j)) > pGradTol) pTopNeumann = false;
+    // Side-level summary built from face-local checks.
+    for (int j = 1; j < s.N - 1; ++j) {
+        if (hasExternalNoSlipSouthForU(s, 1, j)) { flags.bottom = true; break; }
     }
-    flags.bottom = uBottomZero && vBottomZero && pBottomNeumann;
-    flags.top = uTopZero && vTopZero && pTopNeumann;
-
-    // Left side (x=0): inlet usually makes this non-wall by nonzero u.
-    const bool uLeftZero = allAbsBelowRange([&](int i) { return s.u(i, 0); }, 1, s.M - 1, velTol);
-    const bool vLeftZero = allAbsBelowRange([&](int i) { return s.v(i, 0); }, 0, s.M - 1, velTol);
-    bool pLeftNeumann = true;
-    for (int i = 1; i < s.M; ++i) {
-        if (std::abs(s.p(i, 0) - s.p(i, 1)) > pGradTol) pLeftNeumann = false;
+    for (int j = 1; j < s.N - 1; ++j) {
+        if (hasExternalNoSlipNorthForU(s, s.M - 1, j)) { flags.top = true; break; }
     }
-    flags.left = uLeftZero && vLeftZero && pLeftNeumann;
-
-    // Right side (x=L): if pressure is pinned to zero, treat as outlet (not wall).
-    const bool uRightZero = allAbsBelowRange([&](int i) { return s.u(i, s.N - 1); }, 1, s.M - 1, velTol);
-    const bool vRightZero = allAbsBelowRange([&](int i) { return s.v(i, s.N); }, 0, s.M - 1, velTol);
-    bool pRightNeumann = true;
-    bool pRightPinnedZero = true;
-    for (int i = 1; i < s.M; ++i) {
-        if (std::abs(s.p(i, s.N) - s.p(i, s.N - 1)) > pGradTol) pRightNeumann = false;
-        if (std::abs(s.p(i, s.N)) > pPinTol) pRightPinnedZero = false;
+    for (int i = 1; i < s.M - 1; ++i) {
+        if (hasExternalNoSlipWestForV(s, i, 1)) { flags.left = true; break; }
     }
-    flags.right = uRightZero && vRightZero && pRightNeumann && !pRightPinnedZero;
+    for (int i = 1; i < s.M - 1; ++i) {
+        if (hasExternalNoSlipEastForV(s, i, s.N - 1)) { flags.right = true; break; }
+    }
 
     return flags;
 }

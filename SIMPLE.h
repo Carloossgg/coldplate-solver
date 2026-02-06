@@ -65,7 +65,7 @@ public:
     //   2. Pressure drop stabilizes (if usePressureDropConvergence=true), OR
     //   3. maxIterations is reached
     
-    float  epsilon       = 1e-4f;     // Target residual threshold (float precision = 1e-6 is safer)
+    float  epsilon       = 1e-7f;     // Target residual threshold (float precision = 1e-6 is safer)
     int    maxIterations = 1000;    // Maximum outer SIMPLE iterations (safety limit)
     
     // =========================================================================
@@ -197,16 +197,16 @@ public:
     // =========================================================================
     // For microchannel heat sinks with tall, thin fins, the 2.5D model captures
     // out-of-plane (z-direction) effects without solving full 3D equations:
-    //   - Convection scaled by 6/7 (accounts for non-uniform velocity profile)
-    //   - Adds linear drag term: F = -(5μ/2Ht²) * u  [parallel-plate friction]
+    //   - Convection scaled by user factor (default 1.0 = off, e.g. 1.2 = 6/5)
+    //   - Adds linear drag term: F = -(12μ/Ht²) * u  [classical depth-averaged parallel-plate friction]
     //
     // Reference: "Two-layer microchannel model" for topology optimization
     
-    bool   enableTwoPointFiveD = false;    // Enable 2.5D friction term: F = -(5μ/2Ht²) * multiplier * u
-    bool   enableConvectionScaling = false; // Enable 6/7 convection scaling (independent control)
+    bool   enableTwoPointFiveD = false;    // Enable 2.5D reduced-order terms
+    float  twoPointFiveDConvectionFactor = 1.2f; // Multiplier on convective fluxes when 2.5D is ON
     float  Ht_channel = 0.0f;             // Out-of-plane channel height [m] (from geometry file)
-    float  twoPointFiveDSinkMultiplier = 4.8f; // Multiplier on base sink coefficient
-        // Base = (5/2)μ/Ht²; multiplier ≈4.8 gives 12μ/Ht² (parallel-plate friction)
+    float  twoPointFiveDSinkMultiplier = 1.0f; // Multiplier on classical base sink coefficient
+        // Base = 12μ/Ht² (depth-averaged parallel-plate friction)
 
     // =========================================================================
     // DENSITY-BASED TOPOLOGY OPTIMIZATION (Brinkman Penalization)
@@ -239,7 +239,7 @@ public:
     
     // Default K_min keeps the same α_max as previous defaults:
     // Da = 1e-8 and L_ref = 1e-3 m -> K_min = 1e-14 m^2 lowr value=lower permeability
-    float  brinkmanKMin = 1e-13f;       // Solid-side permeability K_min [m^2]
+    float  brinkmanKMin = 1e-14f;       // Solid-side permeability K_min [m^2]
     float  brinkmanAlphaMax = 0.0f;     // Computed at runtime: μ / K_min
     float  brinkmanQ = 1.0f;            // RAMP convexity parameter (Haertel: 1-8, use 1 for strong penalization)
 
@@ -266,6 +266,43 @@ public:
     bool   logPseudoDtStats = false;      // Print min/max/avg pseudo-Δt each iteration
     
     float  pseudoRefLength = 0.0f;        // Reference length for CFL [m] (0 = auto)
+
+
+    // Pseudo-time controller mode:
+    //   0 = Legacy controls (fixed/Residual ramp/SER/line-search)
+    //   1 = COMSOL-style manual CFL schedule (Eq. 3-66)
+    //   2 = COMSOL-style multiplicative PID CFL controller (Eq. 20-7)
+    int    pseudoControllerMode = 2;
+    bool   pseudoUseMaxResidualMetric = true;  // true=max(U,V,Mass) RMS, false=Mass RMS
+    bool   pseudoUseCFLRatioGate = true;       // Require CFL-ratio=1 for residual convergence
+    float  pseudoCFLInfinity = 1.0e4f;         // COMSOL-like steady-state CFL_inf
+    float  pseudoCFLRatio = 0.0f;              // min(log(CFL)/log(CFL_inf), 1)
+
+    // COMSOL-style manual CFL schedule (Eq. 3-66):
+    // CFL = a^min(n, s1)
+    //     + if(n > o2, m2 * a^min(n-o2, s2), 0)
+    //     + if(n > o3, m3 * a^min(n-o3, s3), 0)
+    float  comsolManualBase = 1.3f;             // a
+    int    comsolManualStage1Span = 9;          // s1
+    int    comsolManualStage2Offset = 20;       // o2
+    int    comsolManualStage2Span = 9;          // s2
+    float  comsolManualStage2Multiplier = 9.0f; // m2
+    int    comsolManualStage3Offset = 40;       // o3
+    int    comsolManualStage3Span = 9;          // s3
+    float  comsolManualStage3Multiplier = 90.0f;// m3
+
+    // COMSOL-style multiplicative PID controller (Eq. 20-7)
+    float  comsolPIDInitialCFL = 1.3f;   // Initial CFL (order one)
+    float  comsolPIDTol = 1e-3f;         // Target nonlinear error estimate
+    float  comsolPIDkP = 0.7f;           // Proportional exponent
+    float  comsolPIDkI = 0.3f;           // Integral exponent
+    float  comsolPIDkD = 0.0f;           // Derivative exponent
+    float  comsolPIDGainMin = 0.2f;      // Clamp on multiplicative CFL gain
+    float  comsolPIDGainMax = 2.5f;      // Clamp on multiplicative CFL gain
+    float  comsolPIDCFLMin = 1.0f;       // Hard lower bound (CFL >= 1)
+    float  comsolPIDCFLMax = 1.0e6f;     // Hard upper bound (safety)
+    float  comsolErrorPrev = -1.0f;      // e_(n-1)
+    float  comsolErrorPrevPrev = -1.0f;  // e_(n-2)
 
     // -------------------------------------------------------------------------
     // Switched Evolution Relaxation (SER) - Mulder & van Leer
@@ -357,8 +394,8 @@ public:
     // Lower values = more stable but slower convergence
     // Typical ranges: velocity 0.3-0.8, pressure 0.1-0.3
     
-    float uvAlpha = 0.6f;    // Velocity under-relaxation factor (reduced for stability)
-    float pAlpha  = 0.2f;    // Pressure under-relaxation factor (reduced for stability)
+    float uvAlpha = 0.7f;    // Velocity under-relaxation factor (reduced for stability)
+    float pAlpha  = 0.3f;    // Pressure under-relaxation factor (reduced for stability)
 
     // =========================================================================
     // RESIDUAL-BASED ARTIFICIAL VISCOSITY (Stabilization)
@@ -366,7 +403,7 @@ public:
     // Adds a small, localized viscosity in cells with large momentum residuals.
     // This is lagged by one iteration (uses previous residuals) to keep the
     // momentum solve stable and cheap. Intended for stabilization only.
-    bool  enableResidualViscosity   = true;
+    bool  enableResidualViscosity   = false;
     float residualViscCoeff         = 2.0f;  // μ_art = C * ρ * h * |R_u|  (dimensionless C)
     float residualViscMinVel        = 0.0f;   // Threshold [m/s] below which μ_art = 0
     float residualViscMaxFactor     = 100.0f;   // Clamp: μ_art ≤ maxFactor * μ
@@ -511,6 +548,13 @@ public:
 
     void updateCflSER(float currentResidL2, int iteration);  // Switched Evolution Relaxation (Mulder & van Leer)
     void applyLineSearch(float currentResidL2);        // Backtracking line search for robustness
+    void updatePseudoTimeController(float currentError, int completedIteration); // Unified pseudo-time controller
+    void resetPseudoTimeControllerState();             // Reset PID/manual state at startup
+    float computeComsolManualCFL(int nonlinearIteration) const; // COMSOL Eq. 3-66
+    float computePseudoCFLRatio(float cfl) const;      // min(log(CFL)/log(CFL_inf), 1)
+    float computePseudoDtFromSpeed(float speed) const; // Local/global pseudo dt utility
+    float pseudoSpeedAtU(int i, int j) const;          // Velocity magnitude at u-face
+    float pseudoSpeedAtV(int i, int j) const;          // Velocity magnitude at v-face
 
     // =========================================================================
     // GEOMETRY LOADING
@@ -550,7 +594,8 @@ public:
                             float fullPressureDrop,
                             float coreStaticDrop,
                             float fullStaticDrop,
-                            float pseudoCFL);
+                            float pseudoCFL,
+                            float pseudoCFLRatio);
     void printIterationRow(int iter,                    // Print one row of iteration data to console
                            float residMassVal,
                            float residUVal,
@@ -560,7 +605,8 @@ public:
                            float fullPressureDrop,
                            float iterTimeMs,
                            int pressureIterations,
-                           float pseudoCFL) const;
+                           float pseudoCFL,
+                           float pseudoCFLRatio) const;
     void printStaticDp(int iter,                        // Print static pressure drop (debug)
                        float coreStaticDrop,
                        float fullStaticDrop) const;
@@ -732,16 +778,24 @@ inline float gammaAtV(const SIMPLE& s, int i, int j) {
 }
 
 // -----------------------------------------------------------------------------
-// External No-Slip Wall Detection
+// External Hard-Wall / Half-Cell Diffusion Detection
 // -----------------------------------------------------------------------------
-// Detect which outer domain sides are currently behaving as no-slip walls.
-// This is used by momentum assembly to apply half-cell diffusion treatment
-// for tangential velocity components at wall-adjacent control volumes.
+// Half-cell diffusion is applied FACE-LOCALLY (not side-global) for momentum
+// control volumes adjacent to external no-slip boundaries.
 //
-// Notes:
-// - A side is considered a wall when both velocity components are ~0 there and
-//   pressure behaves like zero-normal-gradient on that side.
-// - Right pressure-outlet (p pinned to 0) is explicitly filtered out.
+// These helpers intentionally exclude Brinkman/solid regions by requiring the
+// adjacent velocity location to be nearly pure fluid (gamma ~ 1).
+//
+// U-momentum: tangential to horizontal boundaries -> south/north checks.
+// V-momentum: tangential to vertical boundaries   -> west/east checks.
+//
+// fluidTol default is strict so only near-pure-fluid locations get correction.
+bool hasExternalNoSlipSouthForU(const SIMPLE& s, int i, int j, float fluidTol = 0.999f);
+bool hasExternalNoSlipNorthForU(const SIMPLE& s, int i, int j, float fluidTol = 0.999f);
+bool hasExternalNoSlipWestForV (const SIMPLE& s, int i, int j, float fluidTol = 0.999f);
+bool hasExternalNoSlipEastForV (const SIMPLE& s, int i, int j, float fluidTol = 0.999f);
+
+// Side-level summary (legacy logging helper) derived from face-local checks.
 struct ExternalWallFlags {
     bool left = false;
     bool right = false;

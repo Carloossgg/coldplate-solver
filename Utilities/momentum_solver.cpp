@@ -185,12 +185,11 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
     // Constants
     const float maxVel = 3.0f * std::max(std::abs(s.inletVelocity), 0.1f);
     const float sinkCoeff = (s.enableTwoPointFiveD && s.Ht_channel > 0.0f)
-                             ? s.twoPointFiveDSinkMultiplier * (5.0f * eta / (2.0f * s.Ht_channel * s.Ht_channel)) : 0.0f;
+                             ? s.twoPointFiveDSinkMultiplier * (12.0f * eta / (s.Ht_channel * s.Ht_channel)) : 0.0f;
     const float sinkDiag = sinkCoeff * vol;
-    const float hChar = std::min(hx, hy);
     const float DeScale = hy / hx;
     const float DnScale = hx / hy;
-    const ExternalWallFlags externalWalls = detectExternalNoSlipWalls(s);
+    constexpr float halfCellFluidTol = 0.999f;
     
     // Assembly
     {
@@ -218,9 +217,9 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
                 vs = std::clamp(0.5f * (s.v(i-1, j) + s.v(i, j)), -maxVel, maxVel);
             }
             
-            // Convective fluxes (Scaled by rom factor if applicable)
+            // Convective fluxes (scaled by user factor when 2.5D is ON)
             // Master switch behavior: when 2.5D is OFF, convection scaling is OFF.
-            const float convScale = (s.enableTwoPointFiveD && s.enableConvectionScaling) ? (6.0f / 7.0f) : 1.0f;
+            const float convScale = s.enableTwoPointFiveD ? s.twoPointFiveDConvectionFactor : 1.0f;
             float Fe = convScale * rho * hy * ue, Fw = convScale * rho * hy * uw;
             float Fn = convScale * rho * hx * vn, Fs = convScale * rho * hx * vs;
             
@@ -242,24 +241,19 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
             // - U-equation: horizontal walls (top/bottom) affect tangential u
             // - V-equation: vertical walls (left/right) affect tangential v
             if constexpr (IsU) {
-                if (externalWalls.bottom && (i - 1 == 0)) aS += Dn;
-                if (externalWalls.top && (i + 1 == s.M)) aN += Dn;
+                if (hasExternalNoSlipSouthForU(s, i, j, halfCellFluidTol)) aS += Dn;
+                if (hasExternalNoSlipNorthForU(s, i, j, halfCellFluidTol)) aN += Dn;
             } else {
-                if (externalWalls.left && (j - 1 == 0)) aW += De;
-                if (externalWalls.right && (j + 1 == s.N)) aE += De;
+                if (hasExternalNoSlipWestForV(s, i, j, halfCellFluidTol)) aW += De;
+                if (hasExternalNoSlipEastForV(s, i, j, halfCellFluidTol)) aE += De;
             }
             float sumA = aE + aW + aN + aS;
             
             // Pseudo-transient (fully disabled when enablePseudoTimeStepping=false)
             float transCoeff = 0.0f;
             if (s.enablePseudoTimeStepping) {
-                float dtLocal = std::max(s.timeStep, 1e-20f);
-                if (s.useLocalPseudoTime) {
-                    float speed = IsU ? std::max(std::abs(s.u(i, j)), s.minPseudoSpeed)
-                                      : std::max(std::abs(s.v(i, j)), s.minPseudoSpeed);
-                    dtLocal = std::min(dtLocal, s.pseudoCFL * hChar / speed);
-                    dtLocal = std::max(dtLocal, 1e-20f);
-                }
+                const float speed = IsU ? s.pseudoSpeedAtU(i, j) : s.pseudoSpeedAtV(i, j);
+                const float dtLocal = s.computePseudoDtFromSpeed(speed);
                 transCoeff = rho * vol / dtLocal;
             }
             
