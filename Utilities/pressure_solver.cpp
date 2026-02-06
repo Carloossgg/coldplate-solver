@@ -464,11 +464,13 @@ bool SIMPLE::solvePressureSystem(int& pressureIterations, float& localResidMass)
     
     // MSVC OpenMP doesn't support reduction on reference variables, so use local copy
     float residMassLocal = 0.0f;
+    double residMassSumSq = 0.0;
+    long long residMassCount = 0;
 
     // Calculate mass residual (all interior cells)
     {
         ScopedTimer t("Pres: Mass Residual");
-        #pragma omp parallel for reduction(max:residMassLocal) schedule(guided)
+        #pragma omp parallel for reduction(max:residMassLocal) reduction(+:residMassSumSq,residMassCount) schedule(guided)
         for (int i = 1; i < M; ++i) {
             for (int j = 1; j < N; ++j) {
                 if (checkBoundaries(i, j) == 1.0f) continue;
@@ -479,10 +481,18 @@ bool SIMPLE::solvePressureSystem(int& pressureIterations, float& localResidMass)
                 float massS = rho * vStar(i - 1, j) * hx;
                 float b = std::abs(massW - massE + massS - massN);
                 if (b > residMassLocal) residMassLocal = b;
+                residMassSumSq += static_cast<double>(b) * static_cast<double>(b);
+                residMassCount++;
             }
         }
     }
     localResidMass = residMassLocal;
+    residMass_max = residMassLocal;
+    if (residMassCount > 0) {
+        residMass_RMS = static_cast<float>(std::sqrt(residMassSumSq / static_cast<double>(residMassCount)));
+    } else {
+        residMass_RMS = 0.0f;
+    }
     residMass = localResidMass;
 
     bool directSolverSucceeded = false;

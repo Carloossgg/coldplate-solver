@@ -95,6 +95,7 @@ cl /c /EHsc /O2 /arch:AVX2 /fp:fast /openmp:llvm /std:c++17 ^
     Utilities\output.cpp ^
     Utilities\postprocessing.cpp ^
     Utilities\pressure_solver.cpp ^
+    Utilities\stabilization.cpp ^
     Utilities\time_control.cpp ^
     Utilities\solvers\cpu\pcg_solver.cpp ^
     Utilities\solvers\cpu\jacobi_solver.cpp
@@ -121,6 +122,7 @@ link /OUT:simple_gpu.exe ^
     output.obj ^
     postprocessing.obj ^
     pressure_solver.obj ^
+    stabilization.obj ^
     time_control.obj ^
     pcg_solver.obj ^
     pressure_solver_gpu.obj ^

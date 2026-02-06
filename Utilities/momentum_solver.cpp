@@ -188,7 +188,8 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
                              ? s.twoPointFiveDSinkMultiplier * (5.0f * eta / (2.0f * s.Ht_channel * s.Ht_channel)) : 0.0f;
     const float sinkDiag = sinkCoeff * vol;
     const float hChar = std::min(hx, hy);
-    const float De = eta * hy / hx, Dn = eta * hx / hy;
+    const float DeScale = hy / hx;
+    const float DnScale = hx / hy;
     const ExternalWallFlags externalWalls = detectExternalNoSlipWalls(s);
     
     // Assembly
@@ -223,6 +224,14 @@ int solveMomentumGeneric(SIMPLE& s, float& resid) {
             float Fe = convScale * rho * hy * ue, Fw = convScale * rho * hy * uw;
             float Fn = convScale * rho * hx * vn, Fs = convScale * rho * hx * vs;
             
+            // Local effective viscosity (base + residual-based artificial viscosity)
+            float muLocal = eta;
+            if (s.enableResidualViscosity) {
+                muLocal += IsU ? muArtAtU(s, i, j) : muArtAtV(s, i, j);
+            }
+            float De = muLocal * DeScale;
+            float Dn = muLocal * DnScale;
+
             // Upwind coefficients
             float aE = De + std::max(0.0f, -Fe);
             float aW = De + std::max(0.0f, Fw);

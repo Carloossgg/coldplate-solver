@@ -135,6 +135,18 @@ void SIMPLE::loadParameters(const std::string& fileName) {
     }
     std::cout << "Density-based TO: ON (K_min=" << std::scientific << K_min
               << " m^2, alpha_max=" << brinkmanAlphaMax << ")" << std::defaultfloat << std::endl;
+    std::cout << "Residual viscosity: " << (enableResidualViscosity ? "ON" : "OFF") << std::endl;
+    if (enableResidualViscosity) {
+        std::cout << "  coeff=" << residualViscCoeff
+                  << " | minVel=" << residualViscMinVel
+                  << " | maxFactor=" << residualViscMaxFactor
+                  << " | smoothIters=" << residualViscSmoothIters
+                  << " | smoothWeight=" << residualViscSmoothWeight
+                  << std::endl;
+    }
+    std::cout << "Residual reporting: " 
+              << (enableNormalizedResiduals ? "RMS normalized (initial)" : "MAX raw") 
+              << std::endl;
     const char* solverNames[] = {"SOR (Red-Black)", "Parallel CG (Jacobi)", "AMGCL (AMG+CG)", "Direct LDLT (Serial)", "AMGCL-CUDA (GPU Float)"};
     int solverIdx = std::min(std::max(pressureSolverType, 0), 4);
 #ifndef USE_AMGCL
@@ -237,6 +249,10 @@ void SIMPLE::initializeMemory() {
     cellType = Eigen::MatrixXf::Zero(M, N);  // Default: all fluid (0=fluid)
     alpha    = Eigen::MatrixXf::Zero(M, N);
     gamma    = Eigen::MatrixXf::Ones(M, N);  // Default: all fluid (gamma=1)
+
+    uResidualFace = Eigen::MatrixXf::Zero(M + 1, N);
+    vResidualFace = Eigen::MatrixXf::Zero(M, N + 1);
+    muArt         = Eigen::MatrixXf::Zero(M, N);
 
     if (reuseInitialFields) {
         auto loadMatrix = [&](const std::string& baseName, Eigen::MatrixXf& mat) {
@@ -358,7 +374,10 @@ void SIMPLE::runIterations() {
         // CFL ramping: SER takes precedence if enabled, otherwise use other methods
         {
             ScopedTimer t("Outer: CFL Ramping & Line Search");
-            float monitoringResid = serUseMaxResid ? error : residMass;
+            // Time-control should use raw RMS residuals (not normalized) for stability logic.
+            float monitoringResid = serUseMaxResid
+                ? std::max({residU_RMS, residV_RMS, residMass_RMS})
+                : residMass_RMS;
             updateCflSER(monitoringResid, iter);      // Switched Evolution Relaxation (if enabled)
             applyLineSearch(monitoringResid);         // Line search for robustness (works with SER)
             updateCflRamp(monitoringResid);           // Residual-based ramp (disabled if SER on)

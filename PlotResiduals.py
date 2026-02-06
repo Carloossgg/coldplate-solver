@@ -37,6 +37,9 @@ def plot_residuals():
     mass_res = []
     u_res = []
     v_res = []
+    mass_res_norm = []
+    u_res_norm = []
+    v_res_norm = []
     cfl_values = []
     dp_core_iters = []
     dp_core_values = []
@@ -45,30 +48,62 @@ def plot_residuals():
     
     try:
         with open(input_file, 'r') as f:
-            # Skip the header line
-            header = f.readline()
+            # Read header line (if present)
+            header = f.readline().strip()
+            header_cols = header.split() if header else []
+            col_index = {name: idx for idx, name in enumerate(header_cols)}
             
             for line in f:
                 parts = line.strip().split()
                 if not parts: 
                     continue
                 
-                # Parse columns: Iter Mass U V PressureDrop_Core PressureDrop_Full [CFL]
+                # Parse columns by header when available; fallback to legacy indices.
                 iters.append(int(parts[0]))
-                mass_res.append(float(parts[1]))
-                u_res.append(float(parts[2]))
-                v_res.append(float(parts[3]))
+                if col_index:
+                    # Raw RMS
+                    if "MassRMS" in col_index:
+                        mass_res.append(float(parts[col_index["MassRMS"]]))
+                    if "U_RMS" in col_index:
+                        u_res.append(float(parts[col_index["U_RMS"]]))
+                    if "V_RMS" in col_index:
+                        v_res.append(float(parts[col_index["V_RMS"]]))
+                    # Normalized RMS (if present)
+                    if "MassRMSn" in col_index:
+                        mass_res_norm.append(float(parts[col_index["MassRMSn"]]))
+                    if "U_RMSn" in col_index:
+                        u_res_norm.append(float(parts[col_index["U_RMSn"]]))
+                    if "V_RMSn" in col_index:
+                        v_res_norm.append(float(parts[col_index["V_RMSn"]]))
+                else:
+                    # Legacy layout: Iter Mass U V Core_dP Full_dP CFL
+                    mass_res.append(float(parts[1]))
+                    u_res.append(float(parts[2]))
+                    v_res.append(float(parts[3]))
                 
                 # Default dP if columns 4 and 5 exist
-                if len(parts) > 4:
-                    dp_core_iters.append(int(parts[0]))
-                    dp_core_values.append(float(parts[4]))
-                if len(parts) > 5:
-                    dp_full_iters.append(int(parts[0]))
-                    dp_full_values.append(float(parts[5]))
+                # Default dP if columns exist
+                if col_index:
+                    core_key = "Core_dP_AfterInletBuffer(Pa)"
+                    full_key = "Full_dP_FullSystem(Pa)"
+                    if core_key in col_index:
+                        dp_core_iters.append(int(parts[0]))
+                        dp_core_values.append(float(parts[col_index[core_key]]))
+                    if full_key in col_index:
+                        dp_full_iters.append(int(parts[0]))
+                        dp_full_values.append(float(parts[col_index[full_key]]))
+                else:
+                    if len(parts) > 4:
+                        dp_core_iters.append(int(parts[0]))
+                        dp_core_values.append(float(parts[4]))
+                    if len(parts) > 5:
+                        dp_full_iters.append(int(parts[0]))
+                        dp_full_values.append(float(parts[5]))
                 
                 # Handle CFL if exists (new column 6)
-                if len(parts) > 6:
+                if col_index and "CFL" in col_index:
+                    cfl_values.append(float(parts[col_index["CFL"]]))
+                elif len(parts) > 6:
                     cfl_values.append(float(parts[6]))
         
         # If a dedicated pressure-drop file exists, prefer it for plotting
@@ -96,9 +131,13 @@ def plot_residuals():
         fig, ax1 = plt.subplots(figsize=(10, 6))
         
         # Left axis: Residuals (Log Scale)
-        ax1.semilogy(iters, mass_res, label='Mass (Continuity)', linewidth=1.5, color='black')
-        ax1.semilogy(iters, u_res, label='U-Momentum', linewidth=1.5, linestyle='--', color='blue')
-        ax1.semilogy(iters, v_res, label='V-Momentum', linewidth=1.5, linestyle='--', color='red')
+        ax1.semilogy(iters, mass_res, label='Mass RMS (raw)', linewidth=1.5, color='black')
+        ax1.semilogy(iters, u_res, label='U RMS (raw)', linewidth=1.5, linestyle='--', color='blue')
+        ax1.semilogy(iters, v_res, label='V RMS (raw)', linewidth=1.5, linestyle='--', color='red')
+        if mass_res_norm and u_res_norm and v_res_norm:
+            ax1.semilogy(iters, mass_res_norm, label='Mass RMS (norm)', linewidth=1.0, color='black', alpha=0.6)
+            ax1.semilogy(iters, u_res_norm, label='U RMS (norm)', linewidth=1.0, linestyle=':', color='blue', alpha=0.6)
+            ax1.semilogy(iters, v_res_norm, label='V RMS (norm)', linewidth=1.0, linestyle=':', color='red', alpha=0.6)
         ax1.set_xlabel('Iteration')
         ax1.set_ylabel('Residual (Log Scale)')
         ax1.grid(True, which="both", linestyle='-', alpha=0.3)

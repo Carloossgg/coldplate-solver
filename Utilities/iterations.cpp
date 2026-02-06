@@ -277,8 +277,12 @@ float SIMPLE::calculateStep(int& pressureIterations)
             // Get alpha for Brinkman penalization (smooth RAMP interpolation)
             float alphaLocal = alphaAtU(*this, i, j);
 
-            float De = eta * hy / hx;
-            float Dn = eta * hx / hy;
+            float muLocal = eta;
+            if (enableResidualViscosity) {
+                muLocal += muArtAtU(*this, i, j);
+            }
+            float De = muLocal * hy / hx;
+            float Dn = muLocal * hx / hy;
 
             // Face velocities for flux calculation
             float ue = std::max(-maxVel, std::min(maxVel, 0.5f * (u(i, j) + u(i, j + 1))));
@@ -373,8 +377,12 @@ float SIMPLE::calculateStep(int& pressureIterations)
             // Get alpha for Brinkman penalization (smooth RAMP interpolation)
             float alphaLocalV = alphaAtV(*this, i, j);
 
-            float De = eta * hy / hx;
-            float Dn = eta * hx / hy;
+            float muLocalV = eta;
+            if (enableResidualViscosity) {
+                muLocalV += muArtAtV(*this, i, j);
+            }
+            float De = muLocalV * hy / hx;
+            float Dn = muLocalV * hx / hy;
 
             // Face velocities for flux calculation
             float ue = std::max(-maxVel, std::min(maxVel, 0.5f * (u(i, j) + u(i + 1, j))));
@@ -472,6 +480,53 @@ float SIMPLE::calculateStep(int& pressureIterations)
 
     }  // End of else block (explicit momentum solver)
 
+    // -------------------------------------------------------------------------
+    // Momentum residual RMS (computed for reporting/normalization)
+    // -------------------------------------------------------------------------
+    residU_max = residU;
+    residV_max = residV;
+    {
+        double sumU = 0.0;
+        double sumV = 0.0;
+        long long countU = 0;
+        long long countV = 0;
+
+        #pragma omp parallel for reduction(+:sumU,countU) schedule(static)
+        for (int i = 1; i < M; ++i) {
+            for (int j = 1; j < N - 1; ++j) {
+                if (checkBoundaries(i, j) == 1.0f) continue;
+                float diff = uStar(i, j) - uOld(i, j);
+                sumU += static_cast<double>(diff) * static_cast<double>(diff);
+                countU++;
+            }
+        }
+
+        #pragma omp parallel for reduction(+:sumV,countV) schedule(static)
+        for (int i = 1; i < M - 1; ++i) {
+            for (int j = 1; j < N; ++j) {
+                if (checkBoundaries(i, j) == 1.0f) continue;
+                float diff = vStar(i, j) - vOld(i, j);
+                sumV += static_cast<double>(diff) * static_cast<double>(diff);
+                countV++;
+            }
+        }
+
+        residU_RMS = (countU > 0)
+            ? static_cast<float>(std::sqrt(sumU / static_cast<double>(countU)))
+            : 0.0f;
+        residV_RMS = (countV > 0)
+            ? static_cast<float>(std::sqrt(sumV / static_cast<double>(countV)))
+            : 0.0f;
+    }
+
+    // -------------------------------------------------------------------------
+    // Residual-based artificial viscosity update (lagged)
+    // -------------------------------------------------------------------------
+    if (enableResidualViscosity) {
+        updateMomentumResiduals();
+    }
+    updateResidualViscosity();
+
     // =========================================================================
     // STEP 3: PRESSURE CORRECTION (Iterative SOR or Direct Sparse Solver)
     // =========================================================================
@@ -553,6 +608,39 @@ float SIMPLE::calculateStep(int& pressureIterations)
         }
     }
     */
+
+    // -------------------------------------------------------------------------
+    // Residual reporting/normalization (does NOT affect local stabilization)
+    // -------------------------------------------------------------------------
+    const float velFloor = std::max(residNormFloorVel, 1e-30f);
+    const float massFloor = std::max(residNormFloorMass, 1e-30f);
+
+    if (!residU_RMS0_set && residU_RMS > velFloor) {
+        residU_RMS0 = residU_RMS;
+        residU_RMS0_set = true;
+    }
+    if (!residV_RMS0_set && residV_RMS > velFloor) {
+        residV_RMS0 = residV_RMS;
+        residV_RMS0_set = true;
+    }
+    if (!residMass_RMS0_set && residMass_RMS > massFloor) {
+        residMass_RMS0 = residMass_RMS;
+        residMass_RMS0_set = true;
+    }
+
+    if (!residU_RMS0_set) residU_RMS0 = velFloor;
+    if (!residV_RMS0_set) residV_RMS0 = velFloor;
+    if (!residMass_RMS0_set) residMass_RMS0 = massFloor;
+
+    if (enableNormalizedResiduals) {
+        residU = residU_RMS / residU_RMS0;
+        residV = residV_RMS / residV_RMS0;
+        residMass = residMass_RMS / residMass_RMS0;
+    } else {
+        residU = residU_RMS;
+        residV = residV_RMS;
+        residMass = residMass_RMS;
+    }
 
     return std::max({residU, residV, residMass});
 }

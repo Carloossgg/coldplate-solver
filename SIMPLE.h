@@ -65,8 +65,8 @@ public:
     //   2. Pressure drop stabilizes (if usePressureDropConvergence=true), OR
     //   3. maxIterations is reached
     
-    float  epsilon       = 1e-5f;     // Target residual threshold (float precision = 1e-6 is safer)
-    int    maxIterations = 10000;    // Maximum outer SIMPLE iterations (safety limit)
+    float  epsilon       = 1e-4f;     // Target residual threshold (float precision = 1e-6 is safer)
+    int    maxIterations = 1000;    // Maximum outer SIMPLE iterations (safety limit)
     
     // =========================================================================
     // OUTPUT & RESTART CONTROL
@@ -96,7 +96,7 @@ public:
     // (pressure drop) has already converged.
     
     bool   usePressureDropConvergence = true;   // Enable this convergence mode
-    int    dpConvergenceWindow = 1000;          // Moving window size [iterations]
+    int    dpConvergenceWindow = 500;          // Moving window size [iterations]
     float  dpConvergencePercent = 1.0f;         // Converged if std_dev < this % of mean
     bool   usePressureDropSlopeGate = false;    // Additional check: slope must be near-zero
     int    dpSlopeWindowIters = 1000;           // Window for slope calculation
@@ -149,8 +149,8 @@ public:
     // Note: AMGCL typically converges in 5-30 iterations (AMG is very effective!)
     //       Parallel CG needs 50-200 iterations (Jacobi preconditioner is weaker)
     //       If AMGCL hits maxIter, try relaxing tolerance or check matrix conditioning
-    int   maxPressureIter = 20;    // Max iterations (30 for AMGCL, 200 for PCG/SOR)
-    float pTol = 1e-4f;            // Convergence tolerance (relaxed to 1e-5 for float precision)
+    int   maxPressureIter = 30;    // Max iterations (30 for AMGCL, 200 for PCG/SOR)
+    float pTol = 1e-6f;            // Convergence tolerance (relaxed to 1e-5 for float precision)
     
     // SOR-specific parameters (only used when pressureSolverType = 0):
     float sorOmega = 0.0f;         // SOR relaxation factor (0 = auto-compute optimal ω)
@@ -357,18 +357,58 @@ public:
     // Lower values = more stable but slower convergence
     // Typical ranges: velocity 0.3-0.8, pressure 0.1-0.3
     
-    float uvAlpha = 0.5f;    // Velocity under-relaxation factor (reduced for stability)
+    float uvAlpha = 0.6f;    // Velocity under-relaxation factor (reduced for stability)
     float pAlpha  = 0.2f;    // Pressure under-relaxation factor (reduced for stability)
+
+    // =========================================================================
+    // RESIDUAL-BASED ARTIFICIAL VISCOSITY (Stabilization)
+    // =========================================================================
+    // Adds a small, localized viscosity in cells with large momentum residuals.
+    // This is lagged by one iteration (uses previous residuals) to keep the
+    // momentum solve stable and cheap. Intended for stabilization only.
+    bool  enableResidualViscosity   = true;
+    float residualViscCoeff         = 2.0f;  // μ_art = C * ρ * h * |R_u|  (dimensionless C)
+    float residualViscMinVel        = 0.0f;   // Threshold [m/s] below which μ_art = 0
+    float residualViscMaxFactor     = 100.0f;   // Clamp: μ_art ≤ maxFactor * μ
+    int   residualViscSmoothIters   = 1;      // Residual smoothing passes (0 = off)
+    float residualViscSmoothWeight  = 1.0f;   // Blend toward neighbor avg [0..1]
 
     // =========================================================================
     // RESIDUAL TRACKING
     // =========================================================================
     // Residuals measure how far the current solution is from satisfying the
     // governing equations. They should decrease each iteration toward epsilon.
-    
-    float residU    = 1.0f;  // Maximum U-velocity change (|u_new - u_old|)
-    float residV    = 1.0f;  // Maximum V-velocity change (|v_new - v_old|)
-    float residMass = 1.0f;  // Maximum mass imbalance (continuity equation error)
+    //
+    // Reporting/Convergence:
+    // - If enableNormalizedResiduals=true, we report RMS residuals normalized
+    //   by their initial RMS values (common CFD practice).
+    // - If false, we report raw RMS residuals (no normalization).
+
+    bool  enableNormalizedResiduals = false;  // Master switch for RMS normalized residual reporting
+
+    float residU    = 1.0f;  // Reported U residual (normalized RMS or raw RMS)
+    float residV    = 1.0f;  // Reported V residual (normalized RMS or raw RMS)
+    float residMass = 1.0f;  // Reported continuity residual (normalized RMS or raw RMS)
+
+    // Raw max residuals (always computed)
+    float residU_max    = 1.0f;
+    float residV_max    = 1.0f;
+    float residMass_max = 1.0f;
+
+    // RMS residuals (always computed)
+    float residU_RMS    = 0.0f;
+    float residV_RMS    = 0.0f;
+    float residMass_RMS = 0.0f;
+
+    // Normalization references (set when residual exceeds a small floor)
+    float residU_RMS0    = 0.0f;
+    float residV_RMS0    = 0.0f;
+    float residMass_RMS0 = 0.0f;
+    bool  residU_RMS0_set = false;
+    bool  residV_RMS0_set = false;
+    bool  residMass_RMS0_set = false;
+    float residNormFloorVel  = 1e-6f;   // Floor for RMS velocity residuals [m/s]
+    float residNormFloorMass = 1e-12f;  // Floor for RMS mass residuals [kg/s]
 
     // =========================================================================
     // PSEUDO-TIME STEP STATISTICS
@@ -442,6 +482,11 @@ public:
     Eigen::MatrixXf alpha;     // Brinkman α field: α = α_max * (1 - γ)
     Eigen::MatrixXf gamma;     // Density field: γ = 1 (fluid), γ = 0 (solid)
 
+    // Residual-based artificial viscosity fields
+    Eigen::MatrixXf uResidualFace; // |uStar - uOld| on u-faces
+    Eigen::MatrixXf vResidualFace; // |vStar - vOld| on v-faces
+    Eigen::MatrixXf muArt;         // Artificial viscosity at cell centers
+
     // =========================================================================
     // CONSTRUCTOR & INITIALIZATION
     // =========================================================================
@@ -474,6 +519,8 @@ public:
     void loadTopology(const std::string& fileName);     // Read cellType from geometry_fluid.txt
     void loadDensityField();                            // Convert cellType → gamma (invert 0↔1)
     void buildAlphaFromDensity();                       // Compute α = α_max * (1 - γ)
+    void updateMomentumResiduals();                     // Compute per-face momentum residuals
+    void updateResidualViscosity();                     // Build residual-based μ_art field
 
     // =========================================================================
     // BOUNDARY CONDITIONS
@@ -590,6 +637,46 @@ inline float alphaAtV(const SIMPLE& s, int i, int j) {
     
     // Return arithmetic average of top and bottom cell alphas
     return 0.5f * (alpha(ci1, cj) + alpha(ci2, cj));
+}
+
+// ---------------------------------------------------------------------------
+// Residual-based artificial viscosity interpolation
+// ---------------------------------------------------------------------------
+// μ_art is defined at cell centers; interpolate to velocity faces similarly to α.
+inline float muArtAtU(const SIMPLE& s, int i, int j) {
+    const auto& muArt = s.muArt;
+    const int M = s.M;
+    const int N = s.N;
+
+    if (i < 1 || i >= M || j < 1 || j >= N - 1) return 0.0f;
+
+    int ci = i - 1;
+    int cj1 = j - 1;
+    int cj2 = j;
+
+    if (ci < 0 || ci >= muArt.rows()) return 0.0f;
+    if (cj1 < 0 || cj1 >= muArt.cols()) return 0.0f;
+    if (cj2 < 0 || cj2 >= muArt.cols()) return muArt(ci, cj1);
+
+    return 0.5f * (muArt(ci, cj1) + muArt(ci, cj2));
+}
+
+inline float muArtAtV(const SIMPLE& s, int i, int j) {
+    const auto& muArt = s.muArt;
+    const int M = s.M;
+    const int N = s.N;
+
+    if (i < 1 || i >= M - 1 || j < 1 || j >= N) return 0.0f;
+
+    int ci1 = i - 1;
+    int ci2 = i;
+    int cj = j - 1;
+
+    if (cj < 0 || cj >= muArt.cols()) return 0.0f;
+    if (ci1 < 0 || ci1 >= muArt.rows()) return 0.0f;
+    if (ci2 < 0 || ci2 >= muArt.rows()) return muArt(ci1, cj);
+
+    return 0.5f * (muArt(ci1, cj) + muArt(ci2, cj));
 }
 
 // -----------------------------------------------------------------------------

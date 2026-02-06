@@ -40,6 +40,7 @@
 #include "SIMPLE.h"
 #include <iomanip>
 #include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // saveMatrix: Write a 2D Eigen matrix to a text file
@@ -89,6 +90,8 @@ void SIMPLE::saveAll()
     Eigen::MatrixXf uCenter = Eigen::MatrixXf::Zero(physRows, physCols);
     Eigen::MatrixXf vCenter = Eigen::MatrixXf::Zero(physRows, physCols);
     Eigen::MatrixXf pCenter = Eigen::MatrixXf::Zero(physRows, physCols);
+    Eigen::MatrixXf uResidCenter = Eigen::MatrixXf::Zero(physRows, physCols);
+    Eigen::MatrixXf vResidCenter = Eigen::MatrixXf::Zero(physRows, physCols);
 
     {
         ScopedTimer t2("Output: Cell-Aligned Field Assembly");
@@ -103,6 +106,15 @@ void SIMPLE::saveAll()
                 uCenter(i, j) = 0.5f * (u(uRow, j) + u(uRow, j + 1));
                 vCenter(i, j) = 0.5f * (v(i, vCol) + v(i + 1, vCol));
 
+                // Momentum residuals: per-cell |u - u_old| and |v - v_old| averaged to centers
+                // using the same face-pair averaging as the velocity export.
+                const float duW = u(uRow, j)     - uOld(uRow, j);
+                const float duE = u(uRow, j + 1) - uOld(uRow, j + 1);
+                const float dvS = v(i, vCol)     - vOld(i, vCol);
+                const float dvN = v(i + 1, vCol) - vOld(i + 1, vCol);
+                uResidCenter(i, j) = 0.5f * (std::abs(duW) + std::abs(duE));
+                vResidCenter(i, j) = 0.5f * (std::abs(dvS) + std::abs(dvN));
+
                 // Pressure at physical cell center (offset by 1 due to ghost padding).
                 pCenter(i, j) = p(i + 1, j + 1);
             }
@@ -115,6 +127,8 @@ void SIMPLE::saveAll()
         saveMatrix(uCenter, "u_full");
         saveMatrix(vCenter, "v_full");
         saveMatrix(pCenter, "pressure_full");
+        saveMatrix(uResidCenter, "u_resid_full");
+        saveMatrix(vResidCenter, "v_resid_full");
     }
     
     // ---------------------------------------------------------
@@ -244,6 +258,22 @@ void SIMPLE::saveAll()
                     vtk << alpha(i, j) << "\n";
                 }
             }
+
+            // Momentum residuals (cell-centered)
+            vtk << "SCALARS u_residual double 1\n";
+            vtk << "LOOKUP_TABLE default\n";
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
+                    vtk << uResidCenter(i, j) << "\n";
+                }
+            }
+            vtk << "SCALARS v_residual double 1\n";
+            vtk << "LOOKUP_TABLE default\n";
+            for (int i = 0; i < physRows; ++i) {
+                for (int j = 0; j < physCols; ++j) {
+                    vtk << vResidCenter(i, j) << "\n";
+                }
+            }
             
             // Pressure Gradient Magnitude
             vtk << "SCALARS PressureGradient double 1\n";
@@ -272,7 +302,7 @@ void SIMPLE::saveAll()
 void SIMPLE::initLogFiles(std::ofstream& residFile, std::ofstream& dpFile) {
     residFile.open("ExportFiles/residuals.txt");
     dpFile.open("ExportFiles/pressure_drop_history.txt");
-    residFile << "Iter MassResid UResid VResid Core_dP_AfterInletBuffer(Pa) "
+    residFile << "Iter MassRMS U_RMS V_RMS MassRMSn U_RMSn V_RMSn Core_dP_AfterInletBuffer(Pa) "
               << "Full_dP_FullSystem(Pa) CFL" << std::endl;
     dpFile << "Iter Core_Total(Pa) Full_Total(Pa) Core_Static(Pa) Full_Static(Pa)" << std::endl;
     printIterationHeader();
@@ -280,10 +310,13 @@ void SIMPLE::initLogFiles(std::ofstream& residFile, std::ofstream& dpFile) {
 
 void SIMPLE::printIterationHeader() const {
     std::cout << "Starting simulation..." << std::endl;
+    const char* massLabel = enableNormalizedResiduals ? "MassRMSn" : "MassRMS";
+    const char* uLabel = enableNormalizedResiduals ? "U-RMSn" : "U-RMS";
+    const char* vLabel = enableNormalizedResiduals ? "V-RMSn" : "V-RMS";
     std::cout << std::setw(8) << "Iter"
-              << std::setw(14) << "Mass"
-              << std::setw(14) << "U-vel"
-              << std::setw(14) << "V-vel"
+              << std::setw(14) << massLabel
+              << std::setw(14) << uLabel
+              << std::setw(14) << vLabel
               << std::setw(14) << "TransRes"
               << std::setw(16) << "Core dP (Pa)"
               << std::setw(16) << "Full dP (Pa)"
@@ -301,10 +334,20 @@ void SIMPLE::writeIterationLogs(std::ofstream& residFile,
                                 float coreStaticDrop,
                                 float fullStaticDrop,
                                 float pseudoCFL) {
+    const float massRMS = residMass_RMS;
+    const float uRMS = residU_RMS;
+    const float vRMS = residV_RMS;
+    const float massRMSn = (residMass_RMS0 > 0.0f) ? (residMass_RMS / residMass_RMS0) : 0.0f;
+    const float uRMSn = (residU_RMS0 > 0.0f) ? (residU_RMS / residU_RMS0) : 0.0f;
+    const float vRMSn = (residV_RMS0 > 0.0f) ? (residV_RMS / residV_RMS0) : 0.0f;
+
     residFile << iter << " "
-              << residMass << " "
-              << residU << " "
-              << residV << " "
+              << massRMS << " "
+              << uRMS << " "
+              << vRMS << " "
+              << massRMSn << " "
+              << uRMSn << " "
+              << vRMSn << " "
               << corePressureDrop << " "
               << fullPressureDrop << " "
               << pseudoCFL << std::endl;
