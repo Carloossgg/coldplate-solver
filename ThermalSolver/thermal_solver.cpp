@@ -745,7 +745,31 @@ int main(int argc, char* argv[]) {
                  s.u_xy[j*p.Nx+i]=u[j][i]; 
                  s.v_xy[j*p.Nx+i]=v[j][i]; 
              }
-     s.q0.assign(p.Ny*p.Nx, qf);
+     // s.q0.assign(p.Ny*p.Nx, qf); (Replaced by code below)
+     
+     // Try to load power map from power_map.txt (Format: W/cm^2)
+     int pm_rows, pm_cols;
+     auto pm = read_2d(dir + "/power_map.txt", pm_rows, pm_cols);
+     
+     if (!pm.empty() && pm_rows == rows && pm_cols == cols) {
+         cout << "Loaded power_map.txt (Using spatially varying heat flux)" << endl;
+         s.q0.resize(p.Ny * p.Nx);
+         for(int j=0; j<p.Ny; j++) {
+             for(int i=0; i<p.Nx; i++) {
+                 // POWER MAP INPUT IS W/cm^2 -> Convert to W/m^2 (multiply by 10000)
+                 double val_w_cm2 = pm[j][i];
+                 s.q0[j*p.Nx + i] = val_w_cm2 * 10000.0;
+             }
+         }
+     } else {
+         if (!pm.empty()) {
+             cout << "WARNING: power_map.txt dimensions (" << pm_cols << "x" << pm_rows 
+                  << ") do not match grid (" << cols << "x" << rows << "). Using uniform flux." << endl;
+         } else {
+             cout << "No power_map.txt found. Using uniform heat flux: " << qf << " W/m^2" << endl;
+         }
+         s.q0.assign(p.Ny*p.Nx, qf);
+     }
      
      s.solve();
      s.save_vtk(dir + "/thermal_results_3d.vtk");

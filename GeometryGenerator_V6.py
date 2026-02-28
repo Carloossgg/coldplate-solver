@@ -113,6 +113,11 @@ x_end_fin   = N_inlet + N_heatsink
 # 1 = Solid, 0 = Fluid
 if USE_UNIFORM_VAL:
     geometry = np.full((M_total, N_total), UNIFORM_VAL, dtype=float)
+    # Enforce solid walls of min_solid_width at top and bottom
+    wall_rows = max(1, int(np.ceil(min_solid_width / dy)))
+    geometry[:wall_rows, :] = 1.0
+    geometry[-wall_rows:, :] = 1.0
+    print(f"Uniform mode: wall rows = {wall_rows} ({min_solid_width*1000:.1f} mm solid at top/bottom)")
 else:
     geometry = np.ones((M_total, N_total), dtype=float)
 

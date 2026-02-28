@@ -23,9 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from thermal_adjoint import solve_thermal_adjoint
 
 # Default paths to coldplate ExportFiles (override with env or args)
+# Use a path relative to this script so it works on any laptop
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXPORT_DIR = os.environ.get(
     "COLDPLATE_EXPORT_DIR",
-    r"c:\Thermal_and_Optimization\coldplate-solver-main\coldplate-solver-main\ExportFiles",
+    os.path.join(_SCRIPT_DIR, "..", "ExportFiles"),
 )
 PATHS = {
     "T": os.path.join(EXPORT_DIR, "T_bottom.txt"),
